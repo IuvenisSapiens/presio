@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { LoginDialog } from "@/components/LoginDialog";
+import { authEnabled } from "@/lib/authMode";
 import { useAuth } from "@/lib/useAuth";
 
 /**
@@ -12,6 +13,8 @@ export function AccountControl({ variant = "compact" }: { variant?: "compact" | 
   const { user, signOut, loading } = useAuth();
   const [loginOpen, setLoginOpen] = useState(false);
 
+  // No accounts in a local/offline build — nothing to show.
+  if (!authEnabled) return null;
   if (loading) return null;
 
   if (variant === "section") {

@@ -1,5 +1,6 @@
 import { QRCodeSVG } from "qrcode.react";
 import { Button } from "@/components/ui/button";
+import { authEnabled } from "@/lib/authMode";
 
 // The blurred code/QR with a login-or-sync call to action, shared by the share
 // screen and the controller's Share dialog so they look identical.
@@ -33,7 +34,15 @@ export function SyncShareOverlay({
       </div>
 
       <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-4">
-        {loggedIn ? (
+        {!authEnabled ? (
+          // Offline build: no account provider, so a deck kept in this browser
+          // can't be uploaded for other devices to fetch. Explain rather than
+          // offer a login that can't work.
+          <p className="text-sm text-muted-foreground text-center">
+            Cross-device sharing needs the full deployment with accounts. This
+            offline build keeps the presentation in this browser only.
+          </p>
+        ) : loggedIn ? (
           <>
             <Button onClick={onSync} disabled={syncing}>
               {syncing ? "Syncing…" : "Sync online to share"}

@@ -16,6 +16,7 @@ import { useNewsletterPrompt } from "@/lib/useNewsletterPrompt";
 import { DownloadButton } from "@/components/DownloadButton";
 import { hasCompletedControllerOnboarding } from "@/lib/onboarding";
 import { useAuth } from "@/lib/useAuth";
+import { authEnabled } from "@/lib/authMode";
 import { useClaim } from "@/lib/useClaim";
 import { CurrentSlideCard } from "@/components/controller/CurrentSlideCard";
 import { NextSlideCard } from "@/components/controller/NextSlideCard";
@@ -192,6 +193,10 @@ export function ControllerView({
 
   const { user } = useAuth();
   const loggedIn = !!user;
+  // Drawing and notes editing gate on login only to attach an account; both
+  // work with no server account (see authMode.ts), so a local/offline build
+  // (no auth) unlocks them for everyone rather than prompting a dead login.
+  const canUseAccountFeatures = loggedIn || !authEnabled;
   const { syncing, syncError, sync } = useClaim(id);
 
   // One-time email list prompt after a few minutes of presenting. Waits for
@@ -321,8 +326,8 @@ export function ControllerView({
           muted={muted}
           audioState={audioState}
           onAudioChange={onAudioChange}
-          tool={loggedIn ? tool : "none"}
-          toolbarVisible={toolsOpen && loggedIn}
+          tool={canUseAccountFeatures ? tool : "none"}
+          toolbarVisible={toolsOpen && canUseAccountFeatures}
           onToolChange={setTool}
           onLaserMove={onLaserMove}
           penStyle={activeStyle}
@@ -339,16 +344,16 @@ export function ControllerView({
           type="button"
           data-testid="toolbar-toggle"
           title={
-            !loggedIn
+            !canUseAccountFeatures
               ? "Log in to use drawing tools"
               : toolsOpen
                 ? "Hide drawing tools"
                 : "Show drawing tools"
           }
-          aria-pressed={toolsOpen && loggedIn}
-          onClick={loggedIn ? toggleTools : () => setLoginOpen(true)}
+          aria-pressed={toolsOpen && canUseAccountFeatures}
+          onClick={canUseAccountFeatures ? toggleTools : () => setLoginOpen(true)}
           className={`inline-flex items-center justify-center h-5 w-5 rounded transition-colors ${
-            toolsOpen && loggedIn
+            toolsOpen && canUseAccountFeatures
               ? "text-foreground bg-accent"
               : "text-muted-foreground hover:text-foreground hover:bg-accent"
           }`}
@@ -369,7 +374,7 @@ export function ControllerView({
         <SpeakerNotesCard
           notes={deck.notes.get(currentSlide) ?? ""}
           currentSlide={currentSlide}
-          editable={loggedIn}
+          editable={canUseAccountFeatures}
           onSave={onSaveNotes}
           onRequestLogin={() => setLoginOpen(true)}
           fontScale={notesScale}
@@ -534,9 +539,12 @@ export function ControllerView({
         <DialogOverlay onClose={() => setSettingsOpen(false)} maxWidth="max-w-md">
           <h2 className="text-lg font-semibold">Settings</h2>
 
-          <AccountControl variant="section" />
-
-          <Separator />
+          {authEnabled && (
+            <>
+              <AccountControl variant="section" />
+              <Separator />
+            </>
+          )}
 
           <section className="space-y-2">
             <h3 className="text-sm font-medium">Layout</h3>
@@ -575,7 +583,7 @@ export function ControllerView({
 
           <section className="space-y-2">
             <h3 className="text-sm font-medium">Drawing</h3>
-            {!loggedIn ? (
+            {!canUseAccountFeatures ? (
               <>
                 <p className="text-xs text-muted-foreground">
                   Drawing tools are available for logged-in users.
