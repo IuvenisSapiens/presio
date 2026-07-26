@@ -93,7 +93,7 @@ export default function Share() {
               {local
                 ? authEnabled
                   ? "This presentation stays in your browser. Viewers can join in another window or tab on this device and browser. Log in and sync to share online."
-                  : "This presentation stays in your browser. Viewers can join in another window or tab on this device and browser."
+                  : "This presentation stays in your browser. Share it on your network to let other devices here join — open Presio at this machine's LAN IP (not localhost) so the code and QR are reachable."
                 : "Share this code or scan the QR to join as a viewer"}
             </p>
           </div>

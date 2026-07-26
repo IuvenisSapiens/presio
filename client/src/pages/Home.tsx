@@ -10,7 +10,7 @@ import { PresioLogo } from "@/components/PresioLogo";
 import { MobileNotice } from "@/components/MobileNotice";
 import { idbPut, idbList, idbDelete, idbPruneOlderThan } from "@/lib/localStore";
 import { lsRemove, sessionKey } from "@/lib/storage";
-import { getSessionAuth } from "@/lib/utils";
+import { getSessionAuth, setSessionAuth } from "@/lib/utils";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
 import { supabase } from "@/lib/supabaseClient";
 import "@/lib/pdf"; // ensure pdf.js worker is configured
@@ -104,7 +104,11 @@ export default function Home() {
         body: JSON.stringify({ filename, total_slides: totalSlides }),
       });
       if (!res.ok) throw new Error("Failed to create session");
-      const { id } = await res.json();
+      const { id, controllerToken, passphrase } = await res.json();
+      // Local/offline mode returns the controller token so this browser can
+      // later authorize sharing the deck over the network (see useClaim). Hosted
+      // mode omits it and control stays tied to the logged-in owner.
+      if (controllerToken) setSessionAuth(id, { controllerToken, passphrase });
       try {
         await idbPut({ id, filename, totalSlides, blob: file, createdAt: Date.now() });
       } catch {

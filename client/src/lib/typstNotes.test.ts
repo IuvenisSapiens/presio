@@ -56,6 +56,36 @@ describe("typstAstToMarkdown", () => {
     expect(typstAstToMarkdown(enumed)).toBe("1. first");
   });
 
+  it("keeps apostrophes and quotes, which Typst emits as their own nodes", () => {
+    // `#speaker-notes[Don't forget it's fine]`
+    expect(
+      typstAstToMarkdown(
+        seq(
+          text("Don"),
+          { func: "smartquote", double: false },
+          text("t forget it"),
+          { func: "smartquote", double: false },
+          text("s fine")
+        )
+      )
+    ).toBe("Don't forget it's fine");
+
+    // `#speaker-notes[Don\'t "quoted"]` — the escape produces a `symbol`.
+    expect(
+      typstAstToMarkdown(
+        seq(
+          text("Don"),
+          { func: "symbol", text: "'" },
+          text("t"),
+          { func: "space" },
+          { func: "smartquote", double: true },
+          text("quoted"),
+          { func: "smartquote", double: true }
+        )
+      )
+    ).toBe('Don\'t "quoted"');
+  });
+
   it("renders links with and without a destination", () => {
     expect(
       typstAstToMarkdown({ func: "link", dest: "https://x.com", body: text("site") })

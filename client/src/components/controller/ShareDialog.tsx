@@ -3,6 +3,7 @@ import { DialogOverlay } from "@/components/ui/dialog-overlay";
 import { SessionQRCode } from "@/components/SessionQRCode";
 import { CopyField } from "@/components/CopyField";
 import { SyncShareOverlay } from "@/components/SyncShareOverlay";
+import { authEnabled } from "@/lib/authMode";
 
 // Share overlay shared by desktop and mobile. For a local (not-yet-synced)
 // session it prompts the presenter to sync online; otherwise it shows the QR
@@ -37,8 +38,9 @@ export function ShareDialog({
       {local ? (
         <>
           <p className="text-sm text-muted-foreground text-center">
-            This presentation is local to this browser. Sync it online to let
-            viewers join from any device.
+            {authEnabled
+              ? "This presentation is local to this browser. Sync it online to let viewers join from any device."
+              : "This presentation is local to this browser. Share it on your network to let other devices here join — open Presio at this machine's LAN IP (not localhost) so the code and QR are reachable."}
           </p>
           <br />
           <br />

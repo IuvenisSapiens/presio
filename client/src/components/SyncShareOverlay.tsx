@@ -35,13 +35,15 @@ export function SyncShareOverlay({
 
       <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-4">
         {!authEnabled ? (
-          // Offline build: no account provider, so a deck kept in this browser
-          // can't be uploaded for other devices to fetch. Explain rather than
-          // offer a login that can't work.
-          <p className="text-sm text-muted-foreground text-center">
-            Cross-device sharing needs the full deployment with accounts. This
-            offline build keeps the presentation in this browser only.
-          </p>
+          // Offline build: no accounts, but the server can still host the deck
+          // for other devices on the same network. Uploading it flips the
+          // session to server-hosted so LAN viewers can fetch the PDF.
+          <>
+            <Button onClick={onSync} disabled={syncing}>
+              {syncing ? "Sharing…" : "Share on this network"}
+            </Button>
+            {syncError && <p className="text-sm text-destructive text-center">{syncError}</p>}
+          </>
         ) : loggedIn ? (
           <>
             <Button onClick={onSync} disabled={syncing}>
