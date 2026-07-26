@@ -12,17 +12,13 @@ export const NOTES_SCALE_STEP = 0.125;
 export function SpeakerNotesCard({
   notes,
   currentSlide,
-  editable,
   onSave,
-  onRequestLogin,
   fontScale = 1,
 }: {
   /** This slide's notes, from the deck (kept fresh by the parent on save). */
   notes: string;
   currentSlide: number;
-  editable: boolean;
   onSave: (slide: number, notes: string) => Promise<void>;
-  onRequestLogin: () => void;
   /** Multiplier on the default notes text size. */
   fontScale?: number;
 }) {
@@ -37,10 +33,6 @@ export function SpeakerNotesCard({
   }, [currentSlide]);
 
   const startEdit = () => {
-    if (!editable) {
-      onRequestLogin();
-      return;
-    }
     setDraft(notes);
     setError("");
     setEditing(true);
@@ -87,9 +79,9 @@ export function SpeakerNotesCard({
     <div
       className="h-full flex flex-col"
       onClick={startEdit}
-      title={editable ? "Click to edit speaker notes" : "Log in to edit speaker notes"}
+      title="Click to edit speaker notes"
     >
-      <div className={`flex-1 overflow-y-auto min-h-0 ${editable ? "cursor-text" : ""}`}>
+      <div className="flex-1 overflow-y-auto min-h-0 cursor-text">
         {notes ? (
           <div
             data-testid="speaker-notes"
@@ -98,9 +90,7 @@ export function SpeakerNotesCard({
             dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(marked.parse(notes) as string) }}
           />
         ) : (
-          <p className="text-xs text-muted-foreground">
-            {editable ? "Click to add speaker notes." : "No speaker notes for this slide."}
-          </p>
+          <p className="text-xs text-muted-foreground">Click to add speaker notes.</p>
         )}
       </div>
     </div>
