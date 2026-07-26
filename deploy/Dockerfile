@@ -4,7 +4,11 @@
 # Stage 1 builds the React client. Vite inlines VITE_* values at build time, so
 # they must be present as env (not just runtime). The publishable/anon key is a
 # public key and is safe to bake into the client bundle.
-FROM node:20-alpine AS client-build
+#
+# Pinned to the build host's own architecture: the output is just JS/CSS, so
+# there is nothing arch-specific to emulate. Without this, the arm64 leg of the
+# multi-arch release build runs Vite under QEMU for no benefit.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS client-build
 WORKDIR /app/client
 COPY client/package*.json ./
 RUN npm ci
@@ -22,7 +26,13 @@ RUN npm run build
 FROM node:20-alpine
 WORKDIR /app/server
 COPY server/package*.json ./
-RUN npm ci
+# better-sqlite3 (local mode's storage backend) is a native module with no
+# musl prebuilds, so it compiles from source here and needs a toolchain;
+# removed again once npm ci finishes since the compiled .node binary only
+# needs libstdc++/libgcc at runtime, which the base image already carries.
+RUN apk add --no-cache --virtual .build-deps python3 make g++ \
+  && npm ci \
+  && apk del .build-deps
 COPY server/ .
 COPY --from=client-build /app/client/dist /app/client/dist
 EXPOSE 3001
