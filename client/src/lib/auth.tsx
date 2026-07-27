@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabaseClient";
+import { authEnabled } from "@/lib/authMode";
 import { AuthContext, type AuthContextValue } from "@/lib/useAuth";
 
 // Dev-only: set VITE_DEV_USER (e.g. "dev@example.com") to start signed in as a
@@ -20,7 +21,9 @@ const currentPageUrl = () =>
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
-  const [loading, setLoading] = useState(!devUser);
+  // Nothing to load when auth is disabled (no Supabase) — don't sit in a
+  // loading state or fire requests at the placeholder URL.
+  const [loading, setLoading] = useState(authEnabled && !devUser);
   // Set when the user lands here from a password-reset email; the app shows a
   // "choose a new password" dialog until it's cleared.
   const [passwordRecovery, setPasswordRecovery] = useState(false);
@@ -38,7 +41,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (devUser) return;
+    if (devUser || !authEnabled) return;
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session);
       setLoading(false);

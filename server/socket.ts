@@ -39,6 +39,46 @@ export function clearSessionState(state: SocketState, sessionId: string) {
   state.annotations.delete(sessionId);
 }
 
+// Shape of a join code, used as a free pre-filter before touching the DB.
+// Deliberately looser than the generator's alphabet (which omits I/O/0/1):
+// this is a cheap "could this possibly be a code?" guard, not an auth boundary,
+// and it must keep accepting ids minted by older builds and fixtures.
+const SESSION_ID_RE = /^[A-Z0-9]{6}$/;
+
+// --- join_session throttling ---
+//
+// Only join_session is throttled, and deliberately so. Every other event is
+// wrapped in controllerOnly(), meaning the socket already proved the controller
+// token to reach it — and those are exactly the events that are legitimately
+// high-frequency: slide_change, laser_move (pointer-rate), stroke_progress,
+// media_time. Presenting a long deck, or scrubbing back and forth through
+// hundreds of slides, must never be rate limited, so it isn't.
+//
+// join_session is the exception because it is unauthenticated, queries the DB
+// on every call, and its reply reveals whether a 6-character code exists —
+// an enumeration oracle. Unthrottled, a single socket sustained ~133 probes/sec.
+//
+// A token bucket rather than a fixed window: the burst absorbs the legitimate
+// bunching (initial connect, reconnect storms after a network blip, a viewer
+// flipping browser tabs) while the slow refill caps sustained scanning. Normal
+// clients re-join about twice a minute on the reconcile watchdog, so they never
+// approach this. Buckets live on socket.data and die with the connection.
+const JOIN_BURST = 20;
+const JOIN_REFILL_PER_SEC = 1;
+
+interface JoinBucket { tokens: number; last: number }
+
+function allowJoin(socket: Socket): boolean {
+  const now = Date.now();
+  const bucket: JoinBucket = socket.data.joinBucket ?? { tokens: JOIN_BURST, last: now };
+  bucket.tokens = Math.min(JOIN_BURST, bucket.tokens + ((now - bucket.last) / 1000) * JOIN_REFILL_PER_SEC);
+  bucket.last = now;
+  socket.data.joinBucket = bucket;
+  if (bucket.tokens < 1) return false;
+  bucket.tokens -= 1;
+  return true;
+}
+
 export function registerSocketHandlers(
   io: Server,
   supabase: SupabaseClient,
@@ -64,6 +104,17 @@ export function registerSocketHandlers(
 
   io.on("connection", (socket) => {
     socket.on("join_session", async ({ sessionId, role, token }: { sessionId: string; role: string; token?: string }) => {
+      // Over budget: drop silently. Answering would hand a scanner the timing
+      // signal the throttle exists to deny, and a real client simply retries on
+      // its next watchdog tick, by which point the bucket has refilled.
+      if (!allowJoin(socket)) return;
+
+      // Reject anything that isn't code-shaped without a round trip to the DB.
+      if (typeof sessionId !== "string" || !SESSION_ID_RE.test(sessionId)) {
+        socket.emit("error", { message: "Session not found" });
+        return;
+      }
+
       const { data } = await supabase
         .from("sessions")
         .select("current_slide, total_slides, controller_token")

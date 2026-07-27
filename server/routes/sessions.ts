@@ -2,13 +2,15 @@ import type express from "express";
 import multer from "multer";
 import type { Server } from "socket.io";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { nanoid, customAlphabet } from "nanoid";
+import { nanoid } from "nanoid";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { isValidHttpsUrl, isValidTotalSlides, MAX_TOTAL_SLIDES } from "../validation.js";
 import { getBearerToken, resolveOptionalUserId, requireUser, safeEqual } from "../auth.js";
+import { isLocalMode } from "../local/mode.js";
 import { clearSessionState, type SocketState } from "../socket.js";
 import { baseUrl } from "../lib/baseUrl.js";
 import { createPresentHandoff, handoffTokenFrom } from "../lib/presentHandoff.js";
+import { generatePassphrase, insertSession, ownedExpiry } from "../lib/sessionRows.js";
 
 export interface RouteDeps {
   supabase: SupabaseClient;
@@ -16,38 +18,13 @@ export interface RouteDeps {
   socketState?: SocketState;
 }
 
-const generateSessionId = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 6);
-const generatePassphrase = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 8);
-
 // How many synced presentations a single user may have live at once. Sessions
 // expire (and are marked 'expired' on end), so this caps concurrent —
 // not lifetime — presentations.
 export const MAX_CONCURRENT_PRESENTATIONS = 3;
 
-// Anonymous sessions keep the DB default expiry (24h). Sessions owned by a
-// logged-in user live a week — long enough to prepare a deck days ahead.
-export const OWNED_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const ownedExpiry = () => new Date(Date.now() + OWNED_SESSION_TTL_MS).toISOString();
-
 export function registerSessionRoutes(app: express.Express, { supabase, io, socketState }: RouteDeps) {
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
-
-  // Insert a session row, retrying with a fresh code on collision. Expired
-  // rows are retained indefinitely, so the 6-char code space slowly fills and
-  // a collision must be a retry, not a 500.
-  async function insertSession(row: Record<string, unknown>): Promise<string | null> {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const id = generateSessionId();
-      const { error } = await supabase.from("sessions").insert({ ...row, id });
-      if (!error) return id;
-      if (error.code !== "23505") {
-        console.error("Failed to create session:", error);
-        return null;
-      }
-    }
-    console.error("Failed to create session: code collision after 3 attempts");
-    return null;
-  }
 
   /**
    * POST /api/present — upload a PDF; get a URL that opens a local presentation
@@ -183,12 +160,14 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
     // still allowed — the token is optional, and an invalid one is simply ignored.
     const userId = await resolveOptionalUserId(supabase, req);
 
-    const id = await insertSession({
+    const controllerToken = nanoid(24);
+    const passphrase = generatePassphrase();
+    const id = await insertSession(supabase, {
       pdf_path: "",
       filename,
       total_slides: totalSlides,
-      controller_token: nanoid(24),
-      passphrase: generatePassphrase(),
+      controller_token: controllerToken,
+      passphrase,
       local: true,
       user_id: userId,
       ...(userId ? { expires_at: ownedExpiry() } : {}),
@@ -199,7 +178,12 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
       return;
     }
 
-    res.json({ id });
+    // Local/offline mode has no login, so the creator proves they're the
+    // controller by holding this token (the browser stores it and sends it to
+    // authorize claim / notes-resave). Hosted mode withholds it on purpose —
+    // there, control is tied to the logged-in owner, and the token is only
+    // handed back on a claim.
+    res.json(isLocalMode ? { id, controllerToken, passphrase } : { id });
   });
 
   // Reserve a session whose PDF is hosted externally ("bring your own storage").
@@ -224,7 +208,7 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
 
     const controllerToken = nanoid(24);
     const passphrase = generatePassphrase();
-    const id = await insertSession({
+    const id = await insertSession(supabase, {
       pdf_path: "",
       pdf_url: url,
       filename,
@@ -249,38 +233,59 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
   // Supabase access token.
   app.post("/api/sessions/:id/claim", upload.single("pdf"), async (req, res) => {
     try {
-      const token = getBearerToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
-      const { data: userData, error: userError } = await supabase.auth.getUser(token);
-      if (userError || !userData.user) {
-        res.status(401).json({ error: "Invalid session" });
-        return;
-      }
+      // Local/offline mode has no auth provider, so a synced (server-hosted)
+      // presentation can't have a logged-in owner. Authorize the claim with the
+      // controller token the presenter's browser already holds (same model as
+      // the delete route) and skip the per-user quota, which only exists to cap
+      // storage on the shared hosted service.
+      let userId: string | null;
+      if (isLocalMode) {
+        const { data: row } = await supabase
+          .from("sessions")
+          .select("controller_token")
+          .eq("id", req.params.id)
+          .single();
+        const controllerToken = req.get("x-controller-token") || "";
+        if (!row || !safeEqual(controllerToken, row.controller_token)) {
+          res.status(403).json({ error: "Not authorized" });
+          return;
+        }
+        userId = null;
+      } else {
+        const token = getBearerToken(req);
+        if (!token) {
+          res.status(401).json({ error: "Authentication required" });
+          return;
+        }
+        const { data: userData, error: userError } = await supabase.auth.getUser(token);
+        if (userError || !userData.user) {
+          res.status(401).json({ error: "Invalid session" });
+          return;
+        }
+        userId = userData.user.id;
 
-      // Cap how many synced presentations a user can have live at once. Only count
-      // ones that are still active and not past expiry; sessions marked 'expired'
-      // (ended early or aged out) don't count.
-      // Exclude the session being claimed so a re-claim of the same code is a no-op.
-      const { count, error: countError } = await supabase
-        .from("sessions")
-        .select("id", { count: "exact", head: true })
-        .eq("user_id", userData.user.id)
-        .eq("local", false)
-        .neq("id", req.params.id)
-        .neq("status", "expired")
-        .gt("expires_at", new Date().toISOString());
-      if (countError) {
-        res.status(500).json({ error: "Failed to check presentation limit" });
-        return;
-      }
-      if ((count ?? 0) >= MAX_CONCURRENT_PRESENTATIONS) {
-        res.status(403).json({
-          error: `You can have at most ${MAX_CONCURRENT_PRESENTATIONS} synced presentations at once. End one before syncing another.`,
-        });
-        return;
+        // Cap how many synced presentations a user can have live at once. Only count
+        // ones that are still active and not past expiry; sessions marked 'expired'
+        // (ended early or aged out) don't count.
+        // Exclude the session being claimed so a re-claim of the same code is a no-op.
+        const { count, error: countError } = await supabase
+          .from("sessions")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", userId)
+          .eq("local", false)
+          .neq("id", req.params.id)
+          .neq("status", "expired")
+          .gt("expires_at", new Date().toISOString());
+        if (countError) {
+          res.status(500).json({ error: "Failed to check presentation limit" });
+          return;
+        }
+        if ((count ?? 0) >= MAX_CONCURRENT_PRESENTATIONS) {
+          res.status(403).json({
+            error: `You can have at most ${MAX_CONCURRENT_PRESENTATIONS} synced presentations at once. End one before syncing another.`,
+          });
+          return;
+        }
       }
 
       const file = req.file;
@@ -327,8 +332,9 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
         local: false,
         pdf_path: pdfPath,
         total_slides: totalSlides,
-        user_id: userData.user.id,
-        // Claiming attaches a logged-in owner, so extend to the owned TTL.
+        user_id: userId,
+        // A shared deck should outlive the default 24h anonymous expiry so it
+        // doesn't vanish mid-session; owned/hosted claims get the same TTL.
         expires_at: ownedExpiry(),
       };
       if (Number.isFinite(currentSlide) && currentSlide >= 1) update.current_slide = currentSlide;
@@ -345,24 +351,27 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
       // The pre-claim count check races with concurrent claims (check-then-act
       // isn't atomic). Re-count now that this claim is visible; if parallel
       // claims overshot the cap, roll this one back. Fail-closed: in the rare
-      // tie both claims revert and the user simply retries one.
-      const { count: afterCount } = await supabase
-        .from("sessions")
-        .select("id", { count: "exact", head: true })
-        .eq("user_id", userData.user.id)
-        .eq("local", false)
-        .neq("status", "expired")
-        .gt("expires_at", new Date().toISOString());
-      if ((afterCount ?? 0) > MAX_CONCURRENT_PRESENTATIONS) {
-        await supabase.storage.from("presentations").remove([pdfPath]);
-        await supabase
+      // tie both claims revert and the user simply retries one. No cap in local
+      // mode, so nothing to reconcile there.
+      if (userId) {
+        const { count: afterCount } = await supabase
           .from("sessions")
-          .update({ local: true, pdf_path: "" })
-          .eq("id", row.id);
-        res.status(403).json({
-          error: `You can have at most ${MAX_CONCURRENT_PRESENTATIONS} synced presentations at once. End one before syncing another.`,
-        });
-        return;
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", userId)
+          .eq("local", false)
+          .neq("status", "expired")
+          .gt("expires_at", new Date().toISOString());
+        if ((afterCount ?? 0) > MAX_CONCURRENT_PRESENTATIONS) {
+          await supabase.storage.from("presentations").remove([pdfPath]);
+          await supabase
+            .from("sessions")
+            .update({ local: true, pdf_path: "" })
+            .eq("id", row.id);
+          res.status(403).json({
+            error: `You can have at most ${MAX_CONCURRENT_PRESENTATIONS} synced presentations at once. End one before syncing another.`,
+          });
+          return;
+        }
       }
 
       res.json({
@@ -382,8 +391,10 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
   // Only the authenticated owner may overwrite the stored file.
   app.post("/api/sessions/:id/pdf", upload.single("pdf"), async (req, res) => {
     try {
-      const user = await requireUser(supabase, req);
-      if (!user) {
+      // Hosted sessions are owned by a logged-in user; local mode has no auth,
+      // so authorize by the controller token instead (see the claim route).
+      const user = isLocalMode ? null : await requireUser(supabase, req);
+      if (!isLocalMode && !user) {
         res.status(401).json({ error: "Authentication required" });
         return;
       }
@@ -396,14 +407,17 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
 
       const { data: row, error: rowError } = await supabase
         .from("sessions")
-        .select("id, local, pdf_path, user_id")
+        .select("id, local, pdf_path, user_id, controller_token")
         .eq("id", req.params.id)
         .single();
       if (rowError || !row) {
         res.status(404).json({ error: "Session not found" });
         return;
       }
-      if (row.user_id !== user.id) {
+      const authorized = isLocalMode
+        ? safeEqual(req.get("x-controller-token") || "", row.controller_token)
+        : row.user_id === user!.id;
+      if (!authorized) {
         res.status(403).json({ error: "Not authorized" });
         return;
       }

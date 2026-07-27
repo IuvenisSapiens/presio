@@ -5,6 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { QRCodeSVG } from "qrcode.react";
 import { idbGet } from "@/lib/localStore";
 import { useAuth } from "@/lib/useAuth";
+import { authEnabled } from "@/lib/authMode";
 import { useClaim } from "@/lib/useClaim";
 import { LoginDialog } from "@/components/LoginDialog";
 import { SyncShareOverlay } from "@/components/SyncShareOverlay";
@@ -90,7 +91,9 @@ export default function Share() {
 
             <p className="text-sm text-muted-foreground">
               {local
-                ? "This presentation stays in your browser. Viewers can join in another window or tab on this device and browser. Log in and sync to share online."
+                ? authEnabled
+                  ? "This presentation stays in your browser. Viewers can join in another window or tab on this device and browser. Log in and sync to share online."
+                  : "This presentation stays in your browser. Share it on your network to let other devices here join — open Presio at this machine's LAN IP (not localhost) so the code and QR are reachable."
                 : "Share this code or scan the QR to join as a viewer"}
             </p>
           </div>
@@ -109,7 +112,7 @@ export default function Share() {
                 className="text-muted-foreground hover:text-foreground"
                 onClick={() => start("controller")}
               >
-                {loggedIn ? "Keep it local" : "Continue without login"}
+                {loggedIn || !authEnabled ? "Keep it local" : "Continue without login"}
               </Button>
             </div>
           ) : (

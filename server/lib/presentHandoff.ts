@@ -1,14 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { nanoid, customAlphabet } from "nanoid";
+import { nanoid } from "nanoid";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { isValidTotalSlides, MAX_TOTAL_SLIDES } from "../validation.js";
-
-const generateSessionId = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 6);
-const generatePassphrase = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 8);
-
-// Keep in sync with OWNED_SESSION_TTL_MS in routes/sessions.ts
-const OWNED_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const ownedExpiry = () => new Date(Date.now() + OWNED_SESSION_TTL_MS).toISOString();
+import { generatePassphrase, insertSession, ownedExpiry } from "./sessionRows.js";
 
 export const PRESENT_NEXT =
   "Open url in a browser to start a local presentation (skips share). The PDF is copied into the browser and removed from the server. Unclaimed links expire after 24h (7 days when authenticated).";
@@ -16,20 +10,6 @@ export const PRESENT_NEXT =
 export type PresentResult =
   | { ok: true; id: string; url: string; filename: string; totalSlides: number; next: string; controllerToken: string }
   | { ok: false; status: number; error: string };
-
-async function insertSession(supabase: SupabaseClient, row: Record<string, unknown>): Promise<string | null> {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const id = generateSessionId();
-    const { error } = await supabase.from("sessions").insert({ ...row, id });
-    if (!error) return id;
-    if (error.code !== "23505") {
-      console.error("Failed to create session:", error);
-      return null;
-    }
-  }
-  console.error("Failed to create session: code collision after 3 attempts");
-  return null;
-}
 
 /** Stage a PDF for local handoff; returns an open URL the browser claims into IndexedDB. */
 export async function createPresentHandoff(

@@ -5,6 +5,7 @@
 import type express from "express";
 import multer from "multer";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+import { baseUrl } from "../lib/baseUrl.js";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -204,7 +205,7 @@ export function registerCheckRoute(app: express.Express) {
       return;
     }
 
-    const result = await buildCheckReport(file.buffer, `${req.protocol}://${req.get("host")}`);
+    const result = await buildCheckReport(file.buffer, baseUrl(req));
     if (!result.ok) {
       res.status(result.status).json({ error: result.error });
       return;
