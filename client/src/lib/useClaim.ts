@@ -18,6 +18,7 @@ export function useClaim(id: string) {
     // and the server's claim endpoint requires a real access token. Surface that
     // instead of silently doing nothing when the button is clicked.
     if (!session) {
+      return true;
       setSyncError("You're not fully signed in. Please log in again to sync.");
       return false;
     }

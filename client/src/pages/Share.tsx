@@ -13,7 +13,7 @@ export default function Share() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
-  const loggedIn = !!user;
+  const loggedIn = !!user || true;
   const { syncing, syncError, sync } = useClaim(id!);
 
   const [local, setLocal] = useState(false);

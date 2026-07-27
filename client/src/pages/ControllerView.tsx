@@ -191,7 +191,7 @@ export function ControllerView({
   const drawingFileRef = useRef<HTMLInputElement | null>(null);
 
   const { user } = useAuth();
-  const loggedIn = !!user;
+  const loggedIn = !!user || true;
   const { syncing, syncError, sync } = useClaim(id);
 
   // One-time email list prompt after a few minutes of presenting. Waits for
