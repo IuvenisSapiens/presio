@@ -48,8 +48,16 @@ export default function Home() {
       const localRecents: RecentSession[] = (await idbList().catch(() => []))
         .map((m) => ({ id: m.id, filename: m.filename, hasToken: true, local: true }));
 
-      // Server-backed presentations tracked via localStorage tokens.
-      const sessionKeys = Object.keys(localStorage).filter((k) => k.startsWith("session_"));
+      // Server-backed presentations tracked via localStorage tokens. A deck can
+      // legitimately have both an IndexedDB copy and a stored token — a local
+      // session that was handed a controller token at creation (offline mode's
+      // /api/sessions/local) or via a handoff link (Start.tsx) — and the server
+      // row still exists for the code, so it would otherwise be listed twice.
+      // The IndexedDB entry is the better one: it knows the deck is local.
+      const localIds = new Set(localRecents.map((r) => r.id));
+      const sessionKeys = Object.keys(localStorage).filter(
+        (k) => k.startsWith("session_") && !localIds.has(k.replace("session_", ""))
+      );
       const serverRecents = await Promise.all(
         sessionKeys.map(async (key) => {
           const id = key.replace("session_", "");

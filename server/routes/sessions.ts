@@ -2,7 +2,7 @@ import type express from "express";
 import multer from "multer";
 import type { Server } from "socket.io";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { nanoid, customAlphabet } from "nanoid";
+import { nanoid } from "nanoid";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { isValidHttpsUrl, isValidTotalSlides, MAX_TOTAL_SLIDES } from "../validation.js";
 import { getBearerToken, resolveOptionalUserId, requireUser, safeEqual } from "../auth.js";
@@ -10,6 +10,7 @@ import { isLocalMode } from "../local/mode.js";
 import { clearSessionState, type SocketState } from "../socket.js";
 import { baseUrl } from "../lib/baseUrl.js";
 import { createPresentHandoff, handoffTokenFrom } from "../lib/presentHandoff.js";
+import { generatePassphrase, insertSession, ownedExpiry } from "../lib/sessionRows.js";
 
 export interface RouteDeps {
   supabase: SupabaseClient;
@@ -17,38 +18,13 @@ export interface RouteDeps {
   socketState?: SocketState;
 }
 
-const generateSessionId = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 6);
-const generatePassphrase = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 8);
-
 // How many synced presentations a single user may have live at once. Sessions
 // expire (and are marked 'expired' on end), so this caps concurrent —
 // not lifetime — presentations.
 export const MAX_CONCURRENT_PRESENTATIONS = 3;
 
-// Anonymous sessions keep the DB default expiry (24h). Sessions owned by a
-// logged-in user live a week — long enough to prepare a deck days ahead.
-export const OWNED_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const ownedExpiry = () => new Date(Date.now() + OWNED_SESSION_TTL_MS).toISOString();
-
 export function registerSessionRoutes(app: express.Express, { supabase, io, socketState }: RouteDeps) {
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
-
-  // Insert a session row, retrying with a fresh code on collision. Expired
-  // rows are retained indefinitely, so the 6-char code space slowly fills and
-  // a collision must be a retry, not a 500.
-  async function insertSession(row: Record<string, unknown>): Promise<string | null> {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const id = generateSessionId();
-      const { error } = await supabase.from("sessions").insert({ ...row, id });
-      if (!error) return id;
-      if (error.code !== "23505") {
-        console.error("Failed to create session:", error);
-        return null;
-      }
-    }
-    console.error("Failed to create session: code collision after 3 attempts");
-    return null;
-  }
 
   /**
    * POST /api/present — upload a PDF; get a URL that opens a local presentation
@@ -186,7 +162,7 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
 
     const controllerToken = nanoid(24);
     const passphrase = generatePassphrase();
-    const id = await insertSession({
+    const id = await insertSession(supabase, {
       pdf_path: "",
       filename,
       total_slides: totalSlides,
@@ -232,7 +208,7 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
 
     const controllerToken = nanoid(24);
     const passphrase = generatePassphrase();
-    const id = await insertSession({
+    const id = await insertSession(supabase, {
       pdf_path: "",
       pdf_url: url,
       filename,

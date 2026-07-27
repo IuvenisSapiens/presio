@@ -3,6 +3,7 @@ import { useParams, useSearchParams, useNavigate, Link } from "react-router-dom"
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { idbPut } from "@/lib/localStore";
+import { setSessionAuth } from "@/lib/utils";
 
 // Deep link from POST /api/present: /start/:id?t=<token>
 // Pulls the staged PDF into IndexedDB (local session), clears the server copy,
@@ -34,6 +35,13 @@ export default function Start() {
         } catch {
           throw new Error("Couldn't store the presentation in this browser. Private/incognito mode isn't supported — please use a normal window.");
         }
+        // Remember the token this link carried: it's the only proof this browser
+        // is the controller. In local/offline mode there are no accounts, so
+        // sharing the deck over the network later (useClaim) authorizes with
+        // exactly this token — without it the sync button could only ever fail
+        // with "this browser isn't the controller".
+        setSessionAuth(id, { controllerToken: token });
+
         await fetch(`/api/sessions/${id}/handoff/complete`, {
           method: "POST",
           headers: { "x-controller-token": token },
