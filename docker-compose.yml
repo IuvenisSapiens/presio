@@ -698,6 +698,11 @@ services:
       SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
       PORT: 3001
       ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-}
+      # Origin used for generated links (canonical/og:url tags, /api/present
+      # handoff URLs, OpenAPI self-references). Pinned to the configured domain
+      # so a spoofed Host header can't poison them; without it the server falls
+      # back to the request's own Host, which the client controls.
+      PUBLIC_BASE_URL: https://${APP_HOST}
       ANALYTICS_URL: ${ANALYTICS_URL:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
