@@ -12,6 +12,12 @@ GlobalWorkerOptions.workerSrc = pdfWorker;
 // whose scale collided with the main view turned the thumbnail black.
 const pageCache = new Map<string, HTMLCanvasElement>();
 
+// Which document pageCache currently holds renders for. Editing speaker notes
+// rewrites the PDF and swaps in a new PDFDocumentProxy; without this the next
+// render of the same page+scale returned the *previous* document's canvas.
+// (notesCache/mediaCache below already key on document identity this way.)
+let pageCachePdf: PDFDocumentProxy | null = null;
+
 /** Blit a cached source canvas into a new, independently-mountable canvas. */
 function copyCanvas(source: HTMLCanvasElement): HTMLCanvasElement {
   const out = document.createElement("canvas");
@@ -52,6 +58,12 @@ export async function renderPage(
   opts: number | RenderOptions = {}
 ): Promise<HTMLCanvasElement> {
   const options: RenderOptions = typeof opts === "number" ? { scale: opts } : opts;
+
+  // A different document invalidates every cached canvas.
+  if (pageCachePdf !== pdf) {
+    pageCache.clear();
+    pageCachePdf = pdf;
+  }
 
   const page = await pdf.getPage(pageNum);
   const baseWidth = page.getViewport({ scale: 1 }).width;
@@ -197,6 +209,31 @@ function revokeMediaUrls() {
   mediaBlobUrls = [];
 }
 
+// Media sidecars come out of the PDF, which is untrusted input — a deck can be
+// handed over or downloaded from anywhere. Neither of the values below is
+// currently exploitable (CSP pins frame-src/media-src, and a `javascript:` URL
+// doesn't execute from `src`), so these are guards against a malformed or
+// hostile sidecar quietly producing a broken embed or an outbound request.
+
+// A video id is interpolated straight into the embed URL's path
+// (lib/mediaPlayer.ts), so restrict it to the character set both providers use
+// rather than letting it reshape the path with slashes or "..".
+function isValidVideoId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+}
+
+// Direct media URLs are fetched by the browser as a <video>/<img> source.
+// https only: CSP's media-src/img-src would reject anything else anyway, and
+// this keeps the failure at parse time where it can be skipped cleanly.
+function isValidMediaUrl(value: unknown): value is string {
+  if (typeof value !== "string" || !value) return false;
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export async function loadMediaPlacements(
   pdf: PDFDocumentProxy
 ): Promise<Map<number, MediaPlacement[]>> {
@@ -250,12 +287,21 @@ export async function loadMediaPlacements(
     const kind: MediaKind =
       m.kind ?? (m.url ? "url" : "file");
     let source: string | undefined;
-    if (kind === "youtube" || kind === "vimeo" || kind === "url") {
+    if (kind === "youtube" || kind === "vimeo") {
+      // Embeds are addressed by video id (buildEmbedSrc), not by this url — a
+      // placement with no usable id can't render at all, since EmbedMediaItem
+      // bails on a falsy videoId rather than mounting a dead frame.
+      if (!isValidVideoId(m.video_id)) continue;
+      source = isValidMediaUrl(m.url) ? m.url : "";
+    } else if (kind === "url") {
+      if (!isValidMediaUrl(m.url)) continue;
       source = m.url;
     } else if (m.filename) {
       source = binaries.get(m.filename);
     }
-    if (!source) continue;
+    // Undefined means no usable source: an unresolved binary, a missing
+    // filename, or a rejected url. (Embeds legitimately carry "" here.)
+    if (source === undefined) continue;
     const dims = await getPageDims(m.slide);
     const placement: MediaPlacement = {
       slide: m.slide,
@@ -284,6 +330,7 @@ export async function loadMediaPlacements(
 
 export function clearCache() {
   pageCache.clear();
+  pageCachePdf = null;
   revokeMediaUrls();
   mediaCache = null;
   mediaCachePdf = null;

@@ -26,6 +26,10 @@ services:
       SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
       PORT: 3001
       ALLOWED_ORIGIN: https://${STAGING_HOST:-staging.presio.xyz}
+      # Pin the origin used in generated links (canonical/og:url, handoff URLs)
+      # instead of deriving it from the client-controlled Host header. Staging
+      # sits behind Traefik on a known hostname, so the value is knowable here.
+      PUBLIC_BASE_URL: https://${STAGING_HOST:-staging.presio.xyz}
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"

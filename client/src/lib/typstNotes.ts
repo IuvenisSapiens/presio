@@ -20,6 +20,12 @@ function walk(node: unknown): string {
       return "  \n";
     case "parbreak":
       return "\n\n";
+    case "smartquote":
+      // Apostrophes and quotes reach us as their own node, with no `text`.
+      return n.double ? '"' : "'";
+    case "symbol":
+      // Escaped punctuation (`\'`) and `#sym.*` carry the literal character.
+      return typeof n.text === "string" ? n.text : "";
     case "sequence":
       return (children ?? []).map(walk).join("");
     case "strong":

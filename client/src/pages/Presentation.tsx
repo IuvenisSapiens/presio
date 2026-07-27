@@ -10,6 +10,7 @@ import { lsGet, lsSet, annotationsKey } from "@/lib/storage";
 import { socket } from "@/lib/socket";
 import { startClockSync } from "@/lib/clock";
 import { supabase } from "@/lib/supabaseClient";
+import { authEnabled } from "@/lib/authMode";
 import { getSessionAuth, endSession } from "@/lib/utils";
 import { idbGet, idbPut, idbDelete } from "@/lib/localStore";
 import { Button } from "@/components/ui/button";
@@ -509,14 +510,25 @@ export default function Presentation() {
         const rec = await idbGet(id!);
         if (rec) await idbPut({ ...rec, blob });
       } else {
-        const { data } = await supabase.auth.getSession();
-        const token = data.session?.access_token;
-        if (!token) throw new Error("Please log in again");
+        // Synced deck: re-upload to its server copy. Hosted mode authorizes
+        // with the owner's login; local/offline mode has no accounts, so
+        // authorize with the controller token this browser holds.
+        let authHeaders: Record<string, string>;
+        if (authEnabled) {
+          const { data } = await supabase.auth.getSession();
+          const token = data.session?.access_token;
+          if (!token) throw new Error("Please log in again");
+          authHeaders = { Authorization: `Bearer ${token}` };
+        } else {
+          const { controllerToken } = getSessionAuth(id!);
+          if (!controllerToken) throw new Error("This browser isn't the controller for this presentation");
+          authHeaders = { "x-controller-token": controllerToken };
+        }
         const form = new FormData();
         form.append("pdf", blob, `${filename || "presentation"}.pdf`);
         const res = await fetch(`/api/sessions/${id}/pdf`, {
           method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
+          headers: authHeaders,
           body: form,
         });
         if (!res.ok) {

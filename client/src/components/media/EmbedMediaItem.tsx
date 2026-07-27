@@ -249,6 +249,7 @@ export function EmbedMediaItem({
       } catch { /* ignore */ }
     };
     // applyState reads inputsRef each call, so it is stable for these deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [placement.kind, placement.videoId, src]);
 
   // Re-apply playback state whenever the controller's mediaState or autostart
@@ -258,11 +259,13 @@ export function EmbedMediaItem({
     applyState();
     // applyState pulls from inputsRef (kept in sync above on every render),
     // so this effect's deps just need to fire on actual input changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mediaState, targeted, autostart, placement.kind, placement.autoplay]);
 
   useEffect(() => {
     applyMute();
     // applyMute reads `muted`/`role`/gesture state; deps trigger on input change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [muted, placement.kind, role, audioGestureGranted]);
 
   // Controller: periodically emit current playback time + sample timestamp,

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { idbGet, idbDelete } from "@/lib/localStore";
 import { supabase } from "@/lib/supabaseClient";
+import { authEnabled } from "@/lib/authMode";
 import { useAuth } from "@/lib/useAuth";
-import { setSessionAuth } from "@/lib/utils";
+import { getSessionAuth, setSessionAuth } from "@/lib/utils";
 
 // Uploads the local PDF and turns this session into a normal synced one (same
 // code). Stores the returned controller token so the presenter keeps control,
@@ -13,11 +14,14 @@ export function useClaim(id: string) {
   const [syncError, setSyncError] = useState("");
 
   const sync = async (currentSlide?: number): Promise<boolean> => {
-    // We may appear "logged in" without a real Supabase session — notably the
-    // dev-only VITE_DEV_USER flag fakes a user but never establishes a session,
-    // and the server's claim endpoint requires a real access token. Surface that
-    // instead of silently doing nothing when the button is clicked.
-    if (!session) {
+    // Local/offline mode has no accounts: authorize the claim with the
+    // controller token this browser stored when it created the session, and
+    // skip the Supabase session entirely.
+    if (authEnabled && !session) {
+      // We may appear "logged in" without a real Supabase session — notably the
+      // dev-only VITE_DEV_USER flag fakes a user but never establishes a session,
+      // and the server's claim endpoint requires a real access token. Surface that
+      // instead of silently doing nothing when the button is clicked.
       return true;
       setSyncError("You're not fully signed in. Please log in again to sync.");
       return false;
@@ -25,12 +29,19 @@ export function useClaim(id: string) {
     setSyncError("");
     setSyncing(true);
     try {
-      // Pull a fresh token rather than the cached session's: getSession()
-      // auto-refreshes if it's near expiry, so the claim never fails with a
-      // stale 401.
-      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError || !sessionData.session) throw new Error("Please log in again");
-      const accessToken = sessionData.session.access_token;
+      let authHeaders: Record<string, string>;
+      if (authEnabled) {
+        // Pull a fresh token rather than the cached session's: getSession()
+        // auto-refreshes if it's near expiry, so the claim never fails with a
+        // stale 401.
+        const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+        if (sessionError || !sessionData.session) throw new Error("Please log in again");
+        authHeaders = { Authorization: `Bearer ${sessionData.session.access_token}` };
+      } else {
+        const { controllerToken } = getSessionAuth(id);
+        if (!controllerToken) throw new Error("This browser isn't the controller for this presentation");
+        authHeaders = { "x-controller-token": controllerToken };
+      }
 
       const rec = await idbGet(id);
       if (!rec) throw new Error("Local copy not found on this device");
@@ -39,7 +50,7 @@ export function useClaim(id: string) {
       if (currentSlide) form.append("current_slide", String(currentSlide));
       const res = await fetch(`/api/sessions/${id}/claim`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}` },
+        headers: authHeaders,
         body: form,
       });
       if (!res.ok) {

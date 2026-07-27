@@ -63,7 +63,47 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
     })
   );
   app.use(cors({ origin: corsOrigin }));
+
+  // Throttle the JSON API to blunt brute-force (passphrase auth) and abuse.
+  // Generous enough not to interfere with normal presenter/viewer flows — note
+  // that live presenting (slide changes, laser, drawing) runs over Socket.IO,
+  // not HTTP, so none of it is counted here; see socket.ts for that side.
+  //
+  // Mounted above the body parsers on purpose: /mcp accepts a 70mb body, and
+  // parsing before throttling would buffer all of it into memory for a request
+  // that is about to be rejected anyway.
+  //
+  // Separate instances, so /api and /mcp get separate budgets. A single shared
+  // instance meant a presenter's ordinary API traffic could exhaust the quota
+  // for that IP's agent calls (and vice versa) — one busy path locked out the
+  // other even though neither was close to abusive on its own.
+  const limiterOpts = { windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false } as const;
+  app.use("/api", rateLimit({ ...limiterOpts }));
+  app.use("/mcp", rateLimit({ ...limiterOpts }));
+
+  // The MCP tools (present_pdf / check_pdf) take the PDF base64-encoded inside
+  // the JSON-RPC body, so /mcp needs a body limit in the same league as the
+  // 50MB multipart cap on /api/present — base64 inflates by 4/3, hence 70mb.
+  // Under express.json()'s 100kb default anything past ~75kB of PDF failed with
+  // an HTML PayloadTooLargeError page, which MCP clients can't even parse as a
+  // JSON-RPC error. Mounted before the global parser so it wins for this path.
+  app.use("/mcp", express.json({ limit: "70mb" }));
   app.use(express.json());
+
+  // Body-parser failures (oversized payload, malformed JSON) otherwise fall
+  // through to Express's default handler, which renders an HTML error page — a
+  // parse error for the JSON-RPC and REST clients these paths exist for. Sits
+  // directly after the parsers so it only sees their errors.
+  app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const status = (err as { status?: number })?.status;
+    if (!status || status < 400 || status >= 500) return next(err);
+    const message = status === 413 ? "Request body too large" : "Malformed request body";
+    if (req.path === "/mcp") {
+      res.status(status).json({ jsonrpc: "2.0", error: { code: -32600, message }, id: null });
+      return;
+    }
+    res.status(status).json({ error: message });
+  });
 
   // Liveness probe for uptime monitoring (Uptime Kuma). Outside /api so it's
   // not rate-limited, and intentionally cheap — it doesn't touch the DB.
@@ -74,12 +114,6 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
   // Live agent discovery docs (host-aware). Before static/SPA so they aren't
   // swallowed by index.html.
   registerAgentDocRoutes(app);
-
-  // Throttle the JSON API to blunt brute-force (passphrase auth) and abuse.
-  // Generous enough not to interfere with normal presenter/viewer flows.
-  const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: true, legacyHeaders: false });
-  app.use("/api", apiLimiter);
-  app.use("/mcp", apiLimiter);
 
   registerSessionRoutes(app, { supabase, io, socketState });
   registerNewsletterRoutes(app, supabase);
