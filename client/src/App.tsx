@@ -4,7 +4,6 @@ import { ThemeProvider } from "@/lib/theme";
 import { AuthProvider } from "@/lib/auth";
 import { PasswordRecoveryDialog } from "@/components/PasswordRecoveryDialog";
 import Home from "@/pages/Home";
-import Home2 from "@/pages/Home2";
 import Presentation from "@/pages/Presentation";
 import Present from "@/pages/Present";
 import Start from "@/pages/Start";
@@ -22,7 +21,6 @@ export default function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<Home />} />
-            <Route path="/home2" element={<Home2 />} />
             <Route path="/present" element={<Present />} />
             <Route path="/start/:id" element={<Start />} />
             <Route path="/s/:id" element={<Presentation />} />

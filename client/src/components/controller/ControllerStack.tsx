@@ -19,7 +19,7 @@ export function ControllerStack({
         <p className="text-xs text-muted-foreground font-medium">Current</p>
         <div
           ref={currentCanvasRef}
-          className="flex-1 border rounded-lg overflow-hidden bg-white min-h-0"
+          className="flex-1 border rounded-lg overflow-hidden bg-white min-h-0 select-none [-webkit-touch-callout:none]"
         />
       </div>
       <div className="flex-2 flex flex-col gap-1 min-h-0">

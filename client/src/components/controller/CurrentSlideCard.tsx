@@ -94,7 +94,7 @@ export const CurrentSlideCard = forwardRef<HTMLDivElement, Props>(
 
     return (
       <div className="h-full flex flex-col gap-1">
-        <div className="flex-1 min-h-0 relative rounded overflow-hidden bg-white">
+        <div className="flex-1 min-h-0 relative rounded overflow-hidden bg-white select-none [-webkit-touch-callout:none]">
           <div ref={ref} className="absolute inset-0" />
           {mediaState && mediaPlacements.length > 0 && (
             <MediaOverlay

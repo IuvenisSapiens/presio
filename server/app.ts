@@ -37,12 +37,14 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
   app.set("trust proxy", process.env.TRUST_PROXY === "false" ? false : 1);
 
   const allowedOrigins = getAllowedOrigins();
-  // Local/LAN use has no fixed origin to configure ahead of time — a viewer
-  // might reach this server as localhost, a LAN IP, or a hostname, none of
-  // which are known at startup. Accept any origin unless ALLOWED_ORIGIN was
-  // set explicitly (which still takes priority even in local mode).
+  // Development and local/LAN use have no fixed origin to configure ahead of
+  // time — the client can be reached as localhost, a LAN IP, or a hostname
+  // (e.g. `npm run dev` viewed from a phone/tablet on the same network), none
+  // of which are known at startup. Accept any origin unless ALLOWED_ORIGIN was
+  // set explicitly (which still takes priority).
+  const devOrLocal = process.env.NODE_ENV === "development" || isLocalMode;
   const corsOrigin: cors.CorsOptions["origin"] =
-    !allowedOrigins.length && isLocalMode
+    !allowedOrigins.length && devOrLocal
       ? true
       : (origin, callback) => {
           // No Origin header => same-origin / non-browser client (curl, server-to-server).
