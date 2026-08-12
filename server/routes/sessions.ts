@@ -26,6 +26,30 @@ export const MAX_CONCURRENT_PRESENTATIONS = 3;
 export function registerSessionRoutes(app: express.Express, { supabase, io, socketState }: RouteDeps) {
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
+  // Multer/busboy failures are otherwise unhandled: they carry no `status`, so
+  // they fall past the body-parser handler in app.ts to Express's default one,
+  // which dumps a stack to stderr and answers with an HTML 500 the client can't
+  // parse. The common case is a body that ends before its closing boundary
+  // ("Unexpected end of form") — the browser aborted mid-upload, e.g. because
+  // the Blob it was streaming couldn't be read — which is the uploader's
+  // problem to retry, not a server fault. Answer 400 with a usable message.
+  const uploadField = (field: string): express.RequestHandler => {
+    const handler = upload.single(field);
+    return (req, res, next) =>
+      handler(req, res, (err: unknown) => {
+        if (!err) return next();
+        const code = (err as { code?: string }).code;
+        if (code === "LIMIT_FILE_SIZE") {
+          res.status(413).json({ error: "PDF exceeds the 50MB limit" });
+          return;
+        }
+        console.error(`Upload failed for ${req.method} ${req.path}:`, err);
+        res.status(400).json({
+          error: "The upload didn't complete. Check your connection and try again.",
+        });
+      });
+  };
+
   /**
    * POST /api/present — upload a PDF; get a URL that opens a local presentation
    * (skips share). The PDF is staged briefly, then moved into the browser.
@@ -33,7 +57,7 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
    *   curl -s -F file=@deck.pdf https://presio.xyz/api/present
    *   # open the returned url
    */
-  app.post("/api/present", upload.single("file"), async (req, res) => {
+  app.post("/api/present", uploadField("file"), async (req, res) => {
     try {
       const file = req.file;
       if (!file) {
@@ -231,7 +255,7 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
   // Turn a local session into a synced one: upload the PDF (kept in the client's
   // IndexedDB until now) and attach the authenticated owner. Requires a valid
   // Supabase access token.
-  app.post("/api/sessions/:id/claim", upload.single("pdf"), async (req, res) => {
+  app.post("/api/sessions/:id/claim", uploadField("pdf"), async (req, res) => {
     try {
       // Local/offline mode has no auth provider, so a synced (server-hosted)
       // presentation can't have a logged-in owner. Authorize the claim with the
@@ -389,7 +413,7 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
   // Replace a synced presentation's PDF — used to persist edited speaker notes,
   // which are written back into the PDF as embedded-file sidecars by the client.
   // Only the authenticated owner may overwrite the stored file.
-  app.post("/api/sessions/:id/pdf", upload.single("pdf"), async (req, res) => {
+  app.post("/api/sessions/:id/pdf", uploadField("pdf"), async (req, res) => {
     try {
       // Hosted sessions are owned by a logged-in user; local mode has no auth,
       // so authorize by the controller token instead (see the claim route).

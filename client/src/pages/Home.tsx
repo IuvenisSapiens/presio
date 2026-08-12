@@ -95,9 +95,16 @@ export default function Home() {
       // Everyone defaults to local: keep the PDF in the browser, never upload it.
       // We reserve a session code on the server (marked local) so it is unique.
       // Logged-in users can opt into syncing later from the share screen.
-      const bytes = new Uint8Array(await file.arrayBuffer());
+      const buf = await file.arrayBuffer();
+      // Store a real in-memory copy, not the File itself: a File from the picker
+      // is a reference to bytes on disk, and IndexedDB persists the reference.
+      // If the file later moves or changes, reading it back mid-upload fails and
+      // the browser aborts the multipart body it had already started sending.
+      // Snapshot before getDocument(), which transfers the buffer to the pdf.js
+      // worker and leaves it detached; new Blob([buf]) copies immediately.
+      const blob = new Blob([buf], { type: "application/pdf" });
       setProgress(100);
-      const doc = await getDocument({ data: bytes }).promise;
+      const doc = await getDocument({ data: new Uint8Array(buf) }).promise;
       const totalSlides = doc.numPages;
       doc.destroy();
       const filename = file.name.replace(/\.pdf$/i, "");
@@ -118,7 +125,7 @@ export default function Home() {
       // mode omits it and control stays tied to the logged-in owner.
       if (controllerToken) setSessionAuth(id, { controllerToken, passphrase });
       try {
-        await idbPut({ id, filename, totalSlides, blob: file, createdAt: Date.now() });
+        await idbPut({ id, filename, totalSlides, blob, createdAt: Date.now() });
       } catch {
         throw new Error("Couldn't store the presentation in this browser. Private/incognito mode isn't supported — please use a normal window.");
       }
