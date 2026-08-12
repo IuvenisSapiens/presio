@@ -18,6 +18,9 @@ export const STORAGE_KEYS = {
   controllerOnboarded: "presio_controller_onboarded",
   // Whether the mobile "best on desktop" notice has been dismissed.
   mobileNoticeSeen: "presio_mobile_notice_seen",
+  // Whether the add-to-home-screen prompt has been seen/actioned. Shown on
+  // touch devices while presenting, never on the landing page.
+  installPromptSeen: "presio_install_prompt_seen",
   // Hidden ?desktop=1 escape hatch: force the desktop layout on mobile.
   forceDesktop: "presio_force_desktop",
   // Last-used drawing color/width for the annotation tools.
