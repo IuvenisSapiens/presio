@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import fs from "fs";
+import http from "http";
+import path from "path";
 import request from "supertest";
 import type { Server } from "socket.io";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -13,6 +16,9 @@ function appWith(fake: FakeSupabase) {
 }
 
 const future = () => new Date(Date.now() + 86_400_000).toISOString();
+
+// A real PDF — the claim route parses the upload with pdf.js to count pages.
+const realPdf = fs.readFileSync(path.join(import.meta.dirname, "../example/example.pdf"));
 
 const baseRow = (over: Partial<SessionRow>): SessionRow => ({
   id: "ABC123",
@@ -115,6 +121,62 @@ describe("POST /api/sessions/:id/claim (auth)", () => {
       .set("Authorization", "Bearer tok")
       .attach("pdf", Buffer.from("%PDF-1.4"), { filename: "x.pdf", contentType: "application/pdf" });
     expect(res.status).toBe(403);
+  });
+
+  it("uploads the PDF and flips the session from local to synced", async () => {
+    const fake = new FakeSupabase([baseRow({ local: true, pdf_path: "", user_id: null })]).addToken("tok", "user-1");
+    const res = await request(appWith(fake))
+      .post("/api/sessions/ABC123/claim")
+      .set("Authorization", "Bearer tok")
+      .attach("pdf", realPdf, { filename: "x.pdf", contentType: "application/pdf" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalSlides).toBeGreaterThan(0);
+    expect(fake.rows[0].local).toBe(false);
+    expect(fake.rows[0].pdf_path).toBe("ABC123.pdf");
+  });
+
+  // A browser that aborts mid-upload leaves the multipart body without its
+  // closing boundary. busboy raises "Unexpected end of form", which carries no
+  // status and used to escape to Express's default handler — an HTML 500 the
+  // client parses as a generic failure, with only a stack trace in the logs.
+  it("answers a truncated multipart body with 400 JSON, not an HTML 500", async () => {
+    const app = appWith(new FakeSupabase([baseRow({ local: true })]).addToken("tok", "user-1"));
+    const server = http.createServer(app).listen(0);
+    const port = (server.address() as { port: number }).port;
+
+    try {
+      const res = await new Promise<{ code: number; body: string }>((resolve, reject) => {
+        const boundary = "----presiotest";
+        const req = http.request({
+          port,
+          method: "POST",
+          path: "/api/sessions/ABC123/claim",
+          headers: {
+            Authorization: "Bearer tok",
+            "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          },
+        });
+        req.on("error", reject);
+        req.on("response", (r) => {
+          let body = "";
+          r.on("data", (c) => (body += c));
+          r.on("end", () => resolve({ code: r.statusCode!, body }));
+        });
+        req.write(
+          `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="pdf"; filename="x.pdf"\r\n` +
+            `Content-Type: application/pdf\r\n\r\n` +
+            realPdf.subarray(0, 500).toString("binary")
+        );
+        req.end(); // ends without the trailing --boundary--
+      });
+
+      expect(res.code).toBe(400);
+      expect(JSON.parse(res.body).error).toMatch(/upload didn't complete/i);
+    } finally {
+      server.close();
+    }
   });
 });
 
