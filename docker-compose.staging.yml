@@ -35,6 +35,8 @@ services:
       - "traefik.docker.network=web"
       - "traefik.http.routers.presio-staging.rule=Host(`${STAGING_HOST:-staging.presio.xyz}`)"
       - "traefik.http.routers.presio-staging.entrypoints=websecure"
+      # Serve TLS from the proxy's default certificate (Cloudflare Origin CA).
+      - "traefik.http.routers.presio-staging.tls=true"
       - "traefik.http.services.presio-staging.loadbalancer.server.port=3001"
 
 networks:

@@ -137,6 +137,7 @@ same proxy:
      - "traefik.docker.network=web"
      - "traefik.http.routers.myapp.rule=Host(`app2.example.com`)"
      - "traefik.http.routers.myapp.entrypoints=websecure"
+     - "traefik.http.routers.myapp.tls=true"
      - "traefik.http.services.myapp.loadbalancer.server.port=8080"
    ```
 

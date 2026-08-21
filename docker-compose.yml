@@ -100,6 +100,7 @@ services:
       - "traefik.docker.network=web"
       - "traefik.http.routers.supabase.rule=Host(`${SUPABASE_HOST}`)"
       - "traefik.http.routers.supabase.entrypoints=websecure"
+      - "traefik.http.routers.supabase.tls=true"
       - "traefik.http.services.supabase.loadbalancer.server.port=8000"
     volumes:
       - ./deploy/volumes/api/kong.yml:/home/kong/temp.yml:ro,z
@@ -712,6 +713,7 @@ services:
       - "traefik.docker.network=web"
       - "traefik.http.routers.presio.rule=Host(`${APP_HOST}`)"
       - "traefik.http.routers.presio.entrypoints=websecure"
+      - "traefik.http.routers.presio.tls=true"
       - "traefik.http.services.presio.loadbalancer.server.port=3001"
 
   # One-shot: create the umami database and user in the shared Postgres instance.
@@ -756,6 +758,7 @@ services:
       - "traefik.docker.network=web"
       - "traefik.http.routers.umami.rule=Host(`${UMAMI_HOST}`)"
       - "traefik.http.routers.umami.entrypoints=websecure"
+      - "traefik.http.routers.umami.tls=true"
       - "traefik.http.services.umami.loadbalancer.server.port=3000"
 
   # Uptime Kuma — self-hosted uptime monitoring + status dashboard.
@@ -775,6 +778,7 @@ services:
       - "traefik.docker.network=web"
       - "traefik.http.routers.uptime.rule=Host(`${UPTIME_HOST}`)"
       - "traefik.http.routers.uptime.entrypoints=websecure"
+      - "traefik.http.routers.uptime.tls=true"
       - "traefik.http.services.uptime.loadbalancer.server.port=3001"
 
 networks:
