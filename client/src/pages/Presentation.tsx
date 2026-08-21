@@ -176,6 +176,28 @@ export default function Presentation() {
     };
   }, [id]);
 
+  // The loaded document decides the page count: URL-backed decks re-fetch
+  // their PDF on every load, so a republished file can change the page count
+  // under a value stored at creation time. Adopt the document's count, pull
+  // the current slide back into range, and refresh whatever stored count
+  // remains (IndexedDB record / session row) so every device agrees.
+  useEffect(() => {
+    if (!deckInfo) return;
+    const docTotal = deckInfo.totalSlides;
+    if (totalSlides === docTotal) return;
+    setTotalSlides(docTotal);
+    setCurrentSlide((slide) => Math.min(Math.max(slide, 1), docTotal));
+    if (local) {
+      idbGet(id!).then((rec) => {
+        if (rec && rec.totalSlides !== docTotal) idbPut({ ...rec, totalSlides: docTotal });
+      }).catch(() => { /* best effort */ });
+    } else if (role === "controller") {
+      // Only the controller can correct the stored row; viewers already show
+      // the document-derived count either way.
+      socket.emit("total_slides_change", { totalSlides: docTotal });
+    }
+  }, [deckInfo, totalSlides, local, role, id]);
+
   useEffect(() => {
     if (!filename) return;
     const suffix = role === "controller" ? "Controller" : "Viewer";
@@ -316,6 +338,13 @@ export default function Presentation() {
       setCurrentSlide(slideNumber);
     });
 
+    // The controller corrected the session's page count against the document
+    // it loaded; follow suit and stay in range.
+    socket.on("total_slides_update", ({ totalSlides }: { totalSlides: number }) => {
+      setTotalSlides(totalSlides);
+      setCurrentSlide((slide) => Math.min(Math.max(slide, 1), totalSlides));
+    });
+
     socket.on("sync_all", () => {
       setViewerSlide(null);
     });
@@ -389,6 +418,7 @@ export default function Presentation() {
       socket.off("connect", join);
       socket.off("session_state");
       socket.off("slide_update");
+      socket.off("total_slides_update");
       socket.off("sync_all");
       socket.off("blank_update");
       socket.off("code_update");
