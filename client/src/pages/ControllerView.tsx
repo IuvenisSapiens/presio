@@ -437,7 +437,15 @@ export function ControllerView({
   );
 
   return (
-    <div className={cn("bg-background flex flex-col", isMobile ? "h-dvh" : "h-screen")}>
+    // Safe-area padding is a no-op in browser tabs (viewport-fit=cover is
+    // opted into only when installed — see main.tsx) and keeps the header /
+    // nav bar clear of the notch and home indicator in the installed app.
+    <div
+      className={cn(
+        "bg-background flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]",
+        isMobile ? "h-dvh" : "h-screen"
+      )}
+    >
       <ControllerHeader
         id={id}
         local={local}

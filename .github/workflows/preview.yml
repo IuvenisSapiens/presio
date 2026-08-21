@@ -1,0 +1,175 @@
+name: PR preview
+
+# Per-PR preview environments on the staging host. Every open PR gets its own
+# isolated container at https://staging-pr-<n>.presio.xyz — PRESIO_MODE=local,
+# per-PR SQLite data volume, nothing shared with prod (see
+# docker-compose.preview.yml). Pushing updates it; closing the PR tears it down.
+#
+# One-time host setup (done on ben-docker-1 as `administrator`):
+#   1. DNS/TLS, Cloudflare-only origin: the host firewall only admits
+#      Cloudflare on 80/443, so previews stay behind the edge. Hostnames are a
+#      single level under presio.xyz (staging-pr-<n>) because free Universal
+#      SSL doesn't cover two-level names; an orange-clouded wildcard A record
+#      *.presio.xyz → the host routes them, and the proxy serves a Cloudflare
+#      Origin CA default certificate (*.presio.xyz) back to the edge — no ACME.
+#   2. Bare clone + previews dir + deploy keypair (all under $HOME, no sudo):
+#        git clone --bare https://github.com/benedict-armstrong/presio.git ~/presio.git
+#        mkdir -p ~/presio-previews
+#        ssh-keygen -t ed25519 -f ~/presio-preview-key -N '' -C presio-previews
+#      authorized_keys entry is restricted to tailnet source IPs:
+#        from="100.64.0.0/10,fd7a:115c:a1e0::/48",no-agent-forwarding,...
+#   3. Repo secrets: PREVIEW_SSH_KEY (the private key), PREVIEW_SSH_HOST
+#      (the host's tailnet IP), PREVIEW_SSH_USER, and TAILSCALE_AUTHKEY (an
+#      ephemeral + reusable auth key so runners can join the tailnet and reach
+#      that IP).
+#
+# Fork PRs are skipped: deploying would run untrusted Dockerfile/compose config
+# on the server, and secrets aren't available to fork workflows anyway.
+#
+# If a `closed` event is ever missed (workflow disabled, Actions outage), the
+# leftover preview can be dropped by hand:
+#   docker compose -p presio-pr-<n> -f ~/presio-previews/docker-compose.preview.yml down -v
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed]
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  REPO_DIR: /home/administrator/presio.git # bare clone the workflow fetches PR refs into
+  PREVIEW_DIR: /home/administrator/presio-previews # compose file copy + per-PR worktrees
+
+jobs:
+  deploy:
+    if: github.event.action != 'closed' && !github.event.pull_request.head.repo.fork
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write # sticky preview-URL comment
+    steps:
+      - name: Check secrets
+        env:
+          SSH_KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          SSH_HOST: ${{ secrets.PREVIEW_SSH_HOST }}
+          SSH_USER: ${{ secrets.PREVIEW_SSH_USER }}
+          TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          missing=()
+          [ -z "$SSH_KEY" ] && missing+=(PREVIEW_SSH_KEY)
+          [ -z "$SSH_HOST" ] && missing+=(PREVIEW_SSH_HOST)
+          [ -z "$SSH_USER" ] && missing+=(PREVIEW_SSH_USER)
+          [ -z "$TS_KEY" ] && missing+=(TAILSCALE_AUTHKEY)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing secrets: ${missing[*]} — see the setup notes in .github/workflows/preview.yml"
+            exit 1
+          fi
+
+      - name: Join tailnet
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          hostname: presio-ci-${{ github.run_id }}
+
+      - name: Deploy preview
+        env:
+          SSH_KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          SSH_HOST: ${{ secrets.PREVIEW_SSH_HOST }}
+          SSH_USER: ${{ secrets.PREVIEW_SSH_USER }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+          # Variables expand locally; the heredoc is the remote script.
+          ssh -o BatchMode=yes -o ConnectTimeout=10 "$SSH_USER@$SSH_HOST" bash -se <<EOF
+          set -euo pipefail
+          git -C "$REPO_DIR" fetch --force origin \
+            "pull/$PR/head:refs/remotes/origin/pr-$PR"
+
+          git -C "$REPO_DIR" worktree remove --force "$PREVIEW_DIR/pr-$PR" 2>/dev/null || true
+          git -C "$REPO_DIR" worktree prune
+          git -C "$REPO_DIR" worktree add --detach "$PREVIEW_DIR/pr-$PR" "remotes/origin/pr-$PR"
+
+          # Always take the compose file from main, never from the PR: the PR
+          # then cannot alter the config it is deployed with, and previews of
+          # branches older than this change still work. The fallback to the
+          # PR's own copy exists only to bootstrap this very first deployment,
+          # before the file has landed on main.
+          mkdir -p "$PREVIEW_DIR"
+          if ! git -C "$REPO_DIR" show origin/main:docker-compose.preview.yml \
+            > "$PREVIEW_DIR/docker-compose.preview.yml" 2>/dev/null; then
+            cp "$PREVIEW_DIR/pr-$PR/docker-compose.preview.yml" \
+              "$PREVIEW_DIR/docker-compose.preview.yml"
+          fi
+
+          cd "$PREVIEW_DIR"
+          BUILD_CONTEXT="$PREVIEW_DIR/pr-$PR" PR_NUMBER="$PR" \
+            docker compose -p "presio-pr-$PR" -f docker-compose.preview.yml up -d --build
+          docker image prune -f >/dev/null
+          EOF
+
+      - name: Comment preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const n = context.issue.number;
+            const body =
+              `**Preview ready:** https://staging-pr-${n}.presio.xyz\n\n` +
+              `Isolated local-mode deployment (SQLite, no shared state — login/sync flows live on staging). ` +
+              `Redeploys on every push; torn down when this PR closes.`;
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: n,
+            });
+            const existing = comments.find(
+              (c) => c.user.type === "Bot" && c.body.includes(`staging-pr-${n}.presio.xyz`),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                ...context.repo, comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: n, body,
+              });
+            }
+
+  teardown:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Join tailnet
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          hostname: presio-ci-${{ github.run_id }}
+
+      - name: Tear down preview
+        env:
+          SSH_KEY: ${{ secrets.PREVIEW_SSH_KEY }}
+          SSH_HOST: ${{ secrets.PREVIEW_SSH_HOST }}
+          SSH_USER: ${{ secrets.PREVIEW_SSH_USER }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+          ssh -o BatchMode=yes -o ConnectTimeout=10 "$SSH_USER@$SSH_HOST" bash -se <<EOF
+          set -euo pipefail
+          if [ -f "$PREVIEW_DIR/docker-compose.preview.yml" ]; then
+            cd "$PREVIEW_DIR"
+            PR_NUMBER="$PR" docker compose -p "presio-pr-$PR" \
+              -f docker-compose.preview.yml down -v --remove-orphans || true
+          else
+            docker rm -f "presio-pr-$PR-preview-1" 2>/dev/null || true
+            docker volume rm "presio-pr-${PR}_data" 2>/dev/null || true
+          fi
+          git -C "$REPO_DIR" worktree remove --force "$PREVIEW_DIR/pr-$PR" 2>/dev/null || true
+          git -C "$REPO_DIR" worktree prune
+          docker image prune -f >/dev/null
+          EOF
