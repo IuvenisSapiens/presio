@@ -222,9 +222,11 @@ export function ControllerView({
 
   // Tap the left/right half of the current slide to go back/forward on touch
   // devices. Disabled while a drawing tool is active so a stroke is never
-  // mistaken for a tap.
+  // mistaken for a tap, and while pinch-zoom is active so panning or lifting
+  // fingers off a zoomed slide never flips pages.
+  const [slideZoomActive, setSlideZoomActive] = useState(false);
   useSlideTapNav(currentCanvasRef, {
-    enabled: tool === "none",
+    enabled: tool === "none" && !slideZoomActive,
     onPrev: () => onGoTo(currentSlide - 1),
     onNext: () => onGoTo(currentSlide + 1),
   });
@@ -345,6 +347,7 @@ export function ControllerView({
           onStrokeCommit={onStrokeCommit}
           onStrokeUndo={onStrokeUndo}
           onAnnotationsClear={onAnnotationsClear}
+          onZoomActiveChange={setSlideZoomActive}
         />
       ),
       action: (

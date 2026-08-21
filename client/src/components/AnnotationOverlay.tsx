@@ -11,6 +11,7 @@ import {
   type Stroke,
   type Tool,
 } from "@/lib/annotations";
+import type { SlideZoom } from "@/hooks/useSlidePinchZoom";
 
 // How often the controller streams pointer/stroke updates outward, and how long
 // a viewer keeps showing a laser dot that stopped moving (covers dropped hides).
@@ -39,6 +40,12 @@ interface Props {
   onStrokeCommit?: (stroke: Stroke) => void;
   /** Laser position received from the other side (viewer windows). */
   remoteLaser?: LaserPoint | null;
+  /**
+   * The pinch-zoom transform applied to the wrapper around the slide content.
+   * Pointer positions are mapped back through it so drawing stays aligned to
+   * the content under the finger at every zoom level.
+   */
+  zoom?: SlideZoom;
 }
 
 // Transparent layer stretched over the slide's content rect. It renders the
@@ -56,6 +63,7 @@ export function AnnotationOverlay({
   onStrokeProgress,
   onStrokeCommit,
   remoteLaser,
+  zoom,
 }: Props) {
   const [rect, setRect] = useState<ContentRect | null>(null);
   const [localLaser, setLocalLaser] = useState<LaserPoint | null>(null);
@@ -119,15 +127,22 @@ export function AnnotationOverlay({
     redraw();
   }, [redraw]);
 
+  // Map a pointer position to normalized slide coordinates. The container box
+  // is untransformed (the zoom transform lives on a wrapper inside it), so the
+  // pinch translate/scale is inverted here before normalizing over the
+  // content rect — at identity zoom this reduces to the plain box mapping.
   const toNormalized = useCallback(
     (e: React.PointerEvent<HTMLDivElement>): LaserPoint => {
-      const box = e.currentTarget.getBoundingClientRect();
+      if (!rect) return { x: 0, y: 0 };
+      const box = (containerRef.current ?? e.currentTarget).getBoundingClientRect();
+      const px = (e.clientX - box.left - (zoom?.x ?? 0)) / (zoom?.scale ?? 1);
+      const py = (e.clientY - box.top - (zoom?.y ?? 0)) / (zoom?.scale ?? 1);
       return {
-        x: clamp01((e.clientX - box.left) / box.width),
-        y: clamp01((e.clientY - box.top) / box.height),
+        x: clamp01((px - rect.left) / rect.width),
+        y: clamp01((py - rect.top) / rect.height),
       };
     },
-    []
+    [containerRef, rect, zoom]
   );
 
   const emitThrottled = useCallback((send: () => void) => {
