@@ -1,0 +1,54 @@
+# PR preview deployment — one fully isolated container per pull request,
+# driven by .github/workflows/preview.yml. Unlike docker-compose.staging.yml
+# there is no shared state: PRESIO_MODE=local swaps Supabase for the bundled
+# SQLite + filesystem backend under a per-project volume, so no .env and no
+# Supabase stack is involved. Trade-off: no login/sync flows — test those on
+# the staging slot.
+#
+#   PR_NUMBER=42 BUILD_CONTEXT=. \
+#     docker compose -p presio-pr-42 -f docker-compose.preview.yml up -d --build
+#   → https://pr-42.staging.presio.xyz
+#
+# PR_NUMBER is required: it namespaces the Traefik router/service names (those
+# are global across the shared proxy — two projects reusing one name would
+# fight over the route) and the routed hostname. BUILD_CONTEXT lets the file
+# live outside the tree it builds (the workflow keeps a trusted copy in the
+# previews dir and points it at the per-PR worktree), so a PR can never change
+# the compose config it is deployed with.
+
+services:
+  preview:
+    build:
+      context: ${BUILD_CONTEXT:-.}
+      dockerfile: deploy/Dockerfile
+      # No VITE_* args: like the published presio-local image, the client is
+      # built without Supabase config; PRESIO_MODE=local selects the backend.
+    restart: unless-stopped
+    networks:
+      web:
+    environment:
+      PRESIO_MODE: local
+      LOCAL_DATA_DIR: /data
+      PORT: 3001
+      # Pin the origin used in generated links (canonical/og:url, handoff URLs)
+      # instead of deriving it from the client-controlled Host header.
+      PUBLIC_BASE_URL: https://pr-${PR_NUMBER:?PR_NUMBER is required}.staging.presio.xyz
+    volumes:
+      # Compose prefixes this with the project name (presio-pr-<n>_data), so
+      # `down -v` removes each PR's data along with its containers.
+      - data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.presio-pr-${PR_NUMBER:?PR_NUMBER is required}.rule=Host(`pr-${PR_NUMBER:?PR_NUMBER is required}.staging.presio.xyz`)"
+      - "traefik.http.routers.presio-pr-${PR_NUMBER:?PR_NUMBER is required}.entrypoints=websecure"
+      - "traefik.http.routers.presio-pr-${PR_NUMBER:?PR_NUMBER is required}.tls.certresolver=le"
+      - "traefik.http.services.presio-pr-${PR_NUMBER:?PR_NUMBER is required}.loadbalancer.server.port=3001"
+
+volumes:
+  data:
+
+networks:
+  # Shared with the Traefik proxy (created once per host: `docker network create web`).
+  web:
+    external: true
