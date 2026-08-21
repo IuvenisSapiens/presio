@@ -98,11 +98,11 @@ export const CurrentSlideCard = forwardRef<HTMLDivElement, Props>(
     const showAudio = showControls && hasVideo && !!audioState && !!onAudioChange;
 
     // Pinch to zoom the composed slide (rendered page + annotations move
-    // together). Local to this device; drawing tools take the surface over,
-    // so pinching is only armed while no tool is active.
+    // together). Local to this device. With a drawing tool active the first
+    // finger still draws, but two fingers always pinch and pan.
     const surfaceRef = useRef<HTMLDivElement | null>(null);
-    const { zoom, reset: resetZoom } = useSlidePinchZoom(surfaceRef, {
-      enabled: tool === "none",
+    const { zoom, gesturing, reset: resetZoom } = useSlidePinchZoom(surfaceRef, {
+      drawing: tool !== "none",
       onActiveChange: onZoomActiveChange,
     });
 
@@ -128,7 +128,7 @@ export const CurrentSlideCard = forwardRef<HTMLDivElement, Props>(
               onLaserMove={onLaserMove}
               onStrokeProgress={onStrokeProgress}
               onStrokeCommit={onStrokeCommit}
-              zoom={zoom}
+              gestureActive={gesturing}
             />
           </div>
           {mediaState && mediaPlacements.length > 0 && (

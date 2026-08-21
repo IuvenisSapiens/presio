@@ -17,8 +17,11 @@ export interface SlideZoom {
 const IDENTITY: SlideZoom = { scale: 1, x: 0, y: 0 };
 
 interface PinchZoomOptions {
-  /** Pinch handling is off while a drawing tool owns the surface. */
-  enabled: boolean;
+  /**
+   * A drawing tool owns single-finger input: the first finger draws, so panning
+   * and double-tap-to-reset are off. Two fingers still pinch and pan.
+   */
+  drawing: boolean;
   /** Reports whether a gesture is in progress or the slide is zoomed. */
   onActiveChange?: (active: boolean) => void;
 }
@@ -33,13 +36,13 @@ interface PinchZoomOptions {
 // that should move with the slide content.
 export function useSlidePinchZoom(
   ref: RefObject<HTMLElement | null>,
-  { enabled, onActiveChange }: PinchZoomOptions
+  { drawing, onActiveChange }: PinchZoomOptions
 ) {
   const [zoom, setZoom] = useState<SlideZoom>(IDENTITY);
   // Latest values for the listeners; kept in refs so they are bound once and
   // always see current state without re-binding every render.
   const zoomRef = useRef(zoom);
-  const enabledRef = useRef(enabled);
+  const drawingRef = useRef(drawing);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const pinchBase = useRef<{ dist: number; midX: number; midY: number; zoom: SlideZoom } | null>(null);
   const panLast = useRef<{ x: number; y: number } | null>(null);
@@ -50,8 +53,8 @@ export function useSlidePinchZoom(
     zoomRef.current = zoom;
   }, [zoom]);
   useEffect(() => {
-    enabledRef.current = enabled;
-  }, [enabled]);
+    drawingRef.current = drawing;
+  }, [drawing]);
 
   // Keep the scaled content covering the surface: at origin 0 0 the content
   // spans [x, x + scale*size], which must include [0, size].
@@ -77,10 +80,19 @@ export function useSlidePinchZoom(
     if (!el) return;
     const tracked = pointers.current;
 
+    // Capturing on the surface retargets the pointer away from the annotation
+    // overlay, so it only happens once this hook actually owns the gesture.
+    const capture = (pointerId: number) => {
+      try {
+        el.setPointerCapture(pointerId);
+      } catch {
+        // The pointer may already be gone; nothing to take over.
+      }
+    };
+
     const onPointerDown = (e: PointerEvent) => {
-      if (e.pointerType !== "touch" || !enabledRef.current) return;
+      if (e.pointerType !== "touch") return;
       tracked.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      el.setPointerCapture(e.pointerId);
       setGesturing(tracked.size >= 2);
       if (tracked.size === 2) {
         const [a, b] = [...tracked.values()];
@@ -92,8 +104,10 @@ export function useSlidePinchZoom(
         };
         panLast.current = null;
         lastTap.current = null;
-      } else if (tracked.size === 1 && zoomRef.current.scale > 1) {
+        for (const id of tracked.keys()) capture(id);
+      } else if (tracked.size === 1 && !drawingRef.current && zoomRef.current.scale > 1) {
         panLast.current = { x: e.clientX, y: e.clientY };
+        capture(e.pointerId);
       }
     };
 
@@ -125,18 +139,19 @@ export function useSlidePinchZoom(
 
     const onPointerUp = (e: PointerEvent) => {
       if (!tracked.delete(e.pointerId)) return;
+      const wasPinching = !!pinchBase.current;
       setGesturing(tracked.size >= 2);
       if (tracked.size < 2) pinchBase.current = null;
-      if (tracked.size === 1) {
+      if (tracked.size === 1 && !drawingRef.current) {
         // The remaining finger takes over panning from where it sits now.
         const [p] = [...tracked.values()];
         panLast.current = { x: p.x, y: p.y };
       } else {
         panLast.current = null;
       }
-      // Double-tap resets — but only while zoomed, so taps at fit-to-card
-      // keep reaching slide navigation untouched.
-      if (zoomRef.current.scale > 1 && !pinchBase.current) {
+      // Double-tap resets — but only while zoomed and with no drawing tool
+      // active, so taps keep reaching slide navigation and the pen untouched.
+      if (zoomRef.current.scale > 1 && !wasPinching && !drawingRef.current) {
         const now = performance.now();
         const prev = lastTap.current;
         if (
@@ -186,5 +201,5 @@ export function useSlidePinchZoom(
 
   const reset = useCallback(() => setZoom(IDENTITY), []);
 
-  return { zoom, reset };
+  return { zoom, gesturing, reset };
 }
