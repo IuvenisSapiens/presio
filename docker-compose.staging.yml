@@ -35,7 +35,6 @@ services:
       - "traefik.docker.network=web"
       - "traefik.http.routers.presio-staging.rule=Host(`${STAGING_HOST:-staging.presio.xyz}`)"
       - "traefik.http.routers.presio-staging.entrypoints=websecure"
-      - "traefik.http.routers.presio-staging.tls.certresolver=le"
       - "traefik.http.services.presio-staging.loadbalancer.server.port=3001"
 
 networks:

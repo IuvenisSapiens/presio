@@ -1,15 +1,17 @@
 name: PR preview
 
 # Per-PR preview environments on the staging host. Every open PR gets its own
-# isolated container at https://pr-<n>.staging.presio.xyz — PRESIO_MODE=local,
+# isolated container at https://staging-pr-<n>.presio.xyz — PRESIO_MODE=local,
 # per-PR SQLite data volume, nothing shared with prod (see
 # docker-compose.preview.yml). Pushing updates it; closing the PR tears it down.
 #
 # One-time host setup (done on ben-docker-1 as `administrator`):
-#   1. DNS: wildcard *.staging.presio.xyz A/AAAA → the host, proxy status
-#      "DNS only" in Cloudflare — free Universal SSL doesn't cover two-level
-#      names, so previews must bypass the edge; Traefik's `le` resolver then
-#      issues each pr-<n> certificate on first request.
+#   1. DNS/TLS, Cloudflare-only origin: the host firewall only admits
+#      Cloudflare on 80/443, so previews stay behind the edge. Hostnames are a
+#      single level under presio.xyz (staging-pr-<n>) because free Universal
+#      SSL doesn't cover two-level names; an orange-clouded wildcard A record
+#      *.presio.xyz → the host routes them, and the proxy serves a Cloudflare
+#      Origin CA default certificate (*.presio.xyz) back to the edge — no ACME.
 #   2. Bare clone + previews dir + deploy keypair (all under $HOME, no sudo):
 #        git clone --bare https://github.com/benedict-armstrong/presio.git ~/presio.git
 #        mkdir -p ~/presio-previews
@@ -116,14 +118,14 @@ jobs:
           script: |
             const n = context.issue.number;
             const body =
-              `**Preview ready:** https://pr-${n}.staging.presio.xyz\n\n` +
+              `**Preview ready:** https://staging-pr-${n}.presio.xyz\n\n` +
               `Isolated local-mode deployment (SQLite, no shared state — login/sync flows live on staging). ` +
               `Redeploys on every push; torn down when this PR closes.`;
             const { data: comments } = await github.rest.issues.listComments({
               ...context.repo, issue_number: n,
             });
             const existing = comments.find(
-              (c) => c.user.type === "Bot" && c.body.includes(`pr-${n}.staging.presio.xyz`),
+              (c) => c.user.type === "Bot" && c.body.includes(`staging-pr-${n}.presio.xyz`),
             );
             if (existing) {
               await github.rest.issues.updateComment({
