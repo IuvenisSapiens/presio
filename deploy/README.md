@@ -137,12 +137,17 @@ same proxy:
      - "traefik.docker.network=web"
      - "traefik.http.routers.myapp.rule=Host(`app2.example.com`)"
      - "traefik.http.routers.myapp.entrypoints=websecure"
-     - "traefik.http.routers.myapp.tls.certresolver=le"
+     - "traefik.http.routers.myapp.tls=true"
      - "traefik.http.services.myapp.loadbalancer.server.port=8080"
    ```
 
-3. Point `app2.example.com` at the host and `docker compose up -d`. Traefik
-   picks it up and issues a certificate automatically.
+3. Point `app2.example.com` at the host and `docker compose up -d`. TLS is
+   served from the proxy's default certificate (a Cloudflare Origin CA cert
+   covering `presio.xyz` + `*.presio.xyz`), so keep the hostname one level
+   deep under `presio.xyz` — that's what Cloudflare's edge certificate and
+   the origin cert both cover. No per-host ACME involved: the host firewall
+   only admits Cloudflare on 80/443, so Let's Encrypt validation can't reach
+   the origin anyway.
 
 ## Continuous deployment (optional)
 
