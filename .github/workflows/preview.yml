@@ -46,6 +46,8 @@ jobs:
   deploy:
     if: github.event.action != 'closed' && !github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write # sticky preview-URL comment
     steps:
       - name: Check secrets
         env:
@@ -111,8 +113,6 @@ jobs:
           EOF
 
       - name: Comment preview URL
-        permissions:
-          pull-requests: write
         uses: actions/github-script@v7
         with:
           script: |
