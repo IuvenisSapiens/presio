@@ -9,8 +9,8 @@ import { PresioLogo } from "@/components/PresioLogo";
 import { MobileNotice } from "@/components/MobileNotice";
 import { CodeBlock } from "@/components/CodeBlock";
 import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
-import { idbPut, idbList, type LocalPresentationMeta } from "@/lib/localStore";
-import { setSessionAuth } from "@/lib/utils";
+import { idbPut, idbList } from "@/lib/localStore";
+import { getSessionAuth, setSessionAuth } from "@/lib/utils";
 import { lsRemove, annotationsKey } from "@/lib/storage";
 import { track, sha256Hex } from "@/lib/analytics";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
@@ -227,6 +227,61 @@ function formatRecentDate(ts: number): string {
   return d.toLocaleDateString(undefined, opts);
 }
 
+// One row in the recents list: everything this browser could control. Local
+// decks come from IndexedDB; synced ones are discovered through the controller
+// credentials this browser holds (created+synced here, or taken over via
+// passphrase) — the IndexedDB record is deleted on claim, so without the
+// credential scan a shared deck would vanish from the list.
+interface RecentDeck {
+  id: string;
+  filename: string;
+  totalSlides: number;
+  /** Present only for local decks (IndexedDB creation time). */
+  createdAt: number | null;
+  kind: "local" | "synced";
+}
+
+const SESSION_KEY_RE = /^session_([A-Z0-9]{6})$/;
+
+async function listControlledSynced(): Promise<RecentDeck[]> {
+  const ids: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      const m = key.match(SESSION_KEY_RE);
+      if (m && localStorage.getItem(key)?.includes("controllerToken")) ids.push(m[1]);
+    }
+  } catch {
+    return []; // storage unavailable (private mode): nothing to scan
+  }
+  const out: RecentDeck[] = [];
+  // A browser only controls a handful of decks; a small sequential scan keeps
+  // this trivial and ordered by insertion (most recent credential first).
+  for (const id of ids.slice(0, 20)) {
+    try {
+      const res = await fetch(`/api/sessions/${id}`);
+      if (!res.ok) {
+        // Ended or expired server-side: the stored credential is dead weight.
+        lsRemove(`session_${id}`);
+        continue;
+      }
+      const s = await res.json();
+      if (s.local) continue; // local rows are listed from IndexedDB above
+      out.push({
+        id,
+        filename: s.filename,
+        totalSlides: s.total_slides,
+        createdAt: null,
+        kind: "synced",
+      });
+    } catch {
+      // Offline or server unreachable: skip rather than block the page.
+    }
+  }
+  return out;
+}
+
 export default function Home() {
   const navigate = useNavigate();
   const [dragging, setDragging] = useState(false);
@@ -243,19 +298,44 @@ export default function Home() {
   const [exampleBusy, setExampleBusy] = useState<"typst" | "latex" | null>(null);
   const [exampleError, setExampleError] = useState("");
 
-  // Presentations this browser holds locally, with an in-place "Replace PDF"
+  // Presentations this browser could control, with an in-place "Replace PDF"
   // action so a recompiled deck keeps its code instead of minting a new one.
-  const [recents, setRecents] = useState<LocalPresentationMeta[]>([]);
+  const [recents, setRecents] = useState<RecentDeck[]>([]);
   const replaceInputRef = useRef<HTMLInputElement | null>(null);
-  const [replaceTarget, setReplaceTarget] = useState<LocalPresentationMeta | null>(null);
+  const [replaceTarget, setReplaceTarget] = useState<RecentDeck | null>(null);
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
   const [replacing, setReplacing] = useState(false);
 
   useEffect(() => {
-    idbList().then(setRecents).catch(() => { /* no IndexedDB: no recents */ });
+    let cancelled = false;
+    (async () => {
+      const locals = await idbList()
+        .then((rs) =>
+          rs.map<RecentDeck>((r) => ({
+            id: r.id,
+            filename: r.filename,
+            totalSlides: r.totalSlides,
+            createdAt: r.createdAt,
+            kind: "local",
+          }))
+        )
+        .catch(() => [] as RecentDeck[]);
+      const controlled = await listControlledSynced();
+      if (cancelled) return;
+      // Locals first (they carry a creation date), then synced decks this
+      // browser holds credentials for; dedupe by id, preferring the local copy.
+      const byId = new Map<string, RecentDeck>();
+      for (const deck of [...locals, ...controlled]) {
+        if (!byId.has(deck.id)) byId.set(deck.id, deck);
+      }
+      setRecents([...byId.values()]);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [uploading]);
 
-  const pickReplace = useCallback((target: LocalPresentationMeta) => {
+  const pickReplace = useCallback((target: RecentDeck) => {
     setReplaceFile(null);
     setReplaceTarget(target);
     replaceInputRef.current?.click();
@@ -274,12 +354,45 @@ export default function Home() {
       const totalSlides = doc.numPages;
       doc.destroy();
       const filename = replaceFile.name.replace(/\.pdf$/i, "");
-      try {
-        await idbPut({ ...replaceTarget, blob, filename, totalSlides });
-      } catch {
-        throw new Error(
-          "Couldn't update the presentation in this browser. Private/incognito mode isn't supported — please use a normal window."
-        );
+      if (replaceTarget.kind === "local") {
+        try {
+          await idbPut({
+            id: replaceTarget.id,
+            filename,
+            totalSlides,
+            blob,
+            createdAt: replaceTarget.createdAt ?? Date.now(),
+          });
+        } catch {
+          throw new Error(
+            "Couldn't update the presentation in this browser. Private/incognito mode isn't supported — please use a normal window."
+          );
+        }
+      } else {
+        // Synced deck: overwrite its server copy. The controller token this
+        // browser holds authorizes the write; a logged-in owner token is
+        // attached too when present (the server accepts either).
+        const { controllerToken } = getSessionAuth(replaceTarget.id);
+        if (!controllerToken) {
+          throw new Error("This browser isn't the controller for this presentation");
+        }
+        const headers: Record<string, string> = { "x-controller-token": controllerToken };
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData.session) {
+          headers.Authorization = `Bearer ${sessionData.session.access_token}`;
+        }
+        const form = new FormData();
+        form.append("pdf", blob, `${filename}.pdf`);
+        form.append("filename", filename);
+        const res = await fetch(`/api/sessions/${replaceTarget.id}/pdf`, {
+          method: "POST",
+          headers,
+          body: form,
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || "Failed to replace the PDF");
+        }
       }
       // Drawings are keyed by slide number; a replaced deck invalidates them.
       lsRemove(annotationsKey(replaceTarget.id));
@@ -294,7 +407,7 @@ export default function Home() {
         sha256,
         size: replaceFile.size,
         slides: totalSlides,
-        mode: "local",
+        mode: replaceTarget.kind === "local" ? "local" : "server",
       });
       navigate(`/s/${replaceTarget.id}?role=controller`);
     } catch (e: unknown) {
@@ -629,7 +742,7 @@ export default function Home() {
               {recents.length > 0 && (
                 <div className="mt-8">
                   <div className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-                    On this device
+                    Recent presentations
                   </div>
                   <ul className="space-y-1.5">
                     {recents.map((r) => (
@@ -640,7 +753,14 @@ export default function Home() {
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-sm font-medium">{r.filename}</p>
                           <p className="text-xs text-muted-foreground">
-                            {r.totalSlides} {r.totalSlides === 1 ? "slide" : "slides"} · {formatRecentDate(r.createdAt)}
+                            {r.totalSlides} {r.totalSlides === 1 ? "slide" : "slides"}
+                            {" · "}
+                            <span
+                              className={r.kind === "synced" ? "text-(--home2-accent)" : undefined}
+                            >
+                              {r.kind === "synced" ? "synced" : "local"}
+                            </span>
+                            {r.createdAt !== null && ` · ${formatRecentDate(r.createdAt)}`}
                           </p>
                         </div>
                         <Button
