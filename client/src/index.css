@@ -152,6 +152,20 @@
   }
 }
 
+/* Installed app (added to the home screen): every surface fits the viewport
+   exactly, so nothing legitimate ever scrolls at the document level. Kill
+   overscroll there so a stray drag can't rubber-band the whole UI around;
+   interior panels (notes, thumbnails, dialogs) keep their own scrolling and
+   their end-of-list bounce. Normal browser tabs don't match this query and
+   scroll exactly as before. */
+@media all and (display-mode: standalone) {
+  html,
+  body {
+    height: 100%;
+    overscroll-behavior: none;
+  }
+}
+
 /* Shiki dual-theme: codeToHtml runs with defaultColor:false, so it emits
    --shiki-light / --shiki-dark CSS vars instead of fixed colors. Apply the
    light theme by default and swap to dark when the .dark class is present. */
