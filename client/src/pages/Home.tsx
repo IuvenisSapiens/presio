@@ -10,6 +10,7 @@ import { MobileNotice } from "@/components/MobileNotice";
 import { CodeBlock } from "@/components/CodeBlock";
 import { idbPut } from "@/lib/localStore";
 import { setSessionAuth } from "@/lib/utils";
+import { track, sha256Hex } from "@/lib/analytics";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
 import { supabase } from "@/lib/supabaseClient";
 import "@/lib/pdf"; // ensure pdf.js worker is configured
@@ -253,6 +254,17 @@ export default function Home() {
         // Snapshot before getDocument(), which transfers the buffer to the
         // pdf.js worker and leaves it detached.
         const blob = new Blob([buf], { type: "application/pdf" });
+        // Fingerprint the bytes while they're still readable — getDocument()
+        // below transfers the buffer to the pdf.js worker and detaches it.
+        // Hashing reads memory already in hand, so it adds no file I/O, and
+        // only the digest ever leaves the browser.
+        let sha256: string | undefined;
+        try {
+          sha256 = await sha256Hex(buf);
+        } catch {
+          // No crypto.subtle (e.g. plain-http origins): report the upload
+          // without a fingerprint rather than blocking it.
+        }
         setProgress(100);
         const doc = await getDocument({ data: new Uint8Array(buf) }).promise;
         const totalSlides = doc.numPages;
@@ -276,6 +288,10 @@ export default function Home() {
             "Couldn't store the presentation in this browser. Private/incognito mode isn't supported — please use a normal window."
           );
         }
+        // Counted only once the deck is durably stored; the analytics sink
+        // timestamps each event, so two uploads of the same filename can be
+        // compared by hash to spot recompiled vs. re-uploaded decks.
+        track("upload", { filename, sha256, size: file.size, slides: totalSlides });
         navigate(`/s/${id}/share`);
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "Upload failed");
