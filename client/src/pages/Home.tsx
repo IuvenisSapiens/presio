@@ -758,7 +758,7 @@ export default function Home() {
                             <span
                               className={r.kind === "synced" ? "text-(--home2-accent)" : undefined}
                             >
-                              {r.kind === "synced" ? "synced" : "local"}
+                              {r.kind === "synced" ? "shared" : "local"}
                             </span>
                             {r.createdAt !== null && ` · ${formatRecentDate(r.createdAt)}`}
                           </p>
