@@ -32,6 +32,7 @@ import { ControllerStack } from "@/components/controller/ControllerStack";
 import { ShareDialog } from "@/components/controller/ShareDialog";
 import { ConfirmEndDialog } from "@/components/controller/ConfirmEndDialog";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useSlideTapNav } from "@/hooks/useSlideTapNav";
 import {
   DEFAULT_KEYMAP,
   loadKeymap,
@@ -219,6 +220,17 @@ export function ControllerView({
     setViewerPromptOpen(true);
   }, [id, isMobile, onboardingOpen]);
 
+  // Tap the left/right half of the current slide to go back/forward on touch
+  // devices. Disabled while a drawing tool is active so a stroke is never
+  // mistaken for a tap, and while pinch-zoom is active so panning or lifting
+  // fingers off a zoomed slide never flips pages.
+  const [slideZoomActive, setSlideZoomActive] = useState(false);
+  useSlideTapNav(currentCanvasRef, {
+    enabled: tool === "none" && !slideZoomActive,
+    onPrev: () => onGoTo(currentSlide - 1),
+    onNext: () => onGoTo(currentSlide + 1),
+  });
+
   const [mosaic, setMosaic] = useState<MosaicNode<string> | null>(loadLayout);
   const [hasPreferred, setHasPreferred] = useState(hasPreferredLayout);
   // A card is shown iff it's a leaf in the tree; this drives the Settings checkboxes.
@@ -335,6 +347,7 @@ export function ControllerView({
           onStrokeCommit={onStrokeCommit}
           onStrokeUndo={onStrokeUndo}
           onAnnotationsClear={onAnnotationsClear}
+          onZoomActiveChange={setSlideZoomActive}
         />
       ),
       action: (

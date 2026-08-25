@@ -13,6 +13,7 @@ import { supabase } from "@/lib/supabaseClient";
 import { authEnabled } from "@/lib/authMode";
 import { getSessionAuth, endSession } from "@/lib/utils";
 import { idbGet, idbPut, idbDelete } from "@/lib/localStore";
+import { track } from "@/lib/analytics";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ControllerView } from "./ControllerView";
@@ -24,6 +25,14 @@ export default function Presentation() {
   const navigate = useNavigate();
   const requestedRole = searchParams.get("role") || "viewer";
   const [role, setRole] = useState(requestedRole);
+  // The role once the session actually settles it — null while the request is
+  // still in flight, since the server can hand back something other than what
+  // the URL asked for. Only this drives analytics, never `requestedRole`.
+  const [settledRole, setSettledRole] = useState<string | null>(null);
+  const applyRole = useCallback((next: string) => {
+    setRole(next);
+    setSettledRole(next);
+  }, []);
 
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [pdfUrl, setPdfUrl] = useState("");
@@ -222,7 +231,7 @@ export default function Presentation() {
 
     // Local sessions never touch the server: no socket, sync over the channel.
     if (local) {
-      setRole(requestedRole);
+      applyRole(requestedRole);
       channel.postMessage({ type: "state_request" });
       return () => {
         channel.close();
@@ -296,10 +305,10 @@ export default function Presentation() {
         setAnnotations({});
       }
       if (grantedRole && grantedRole !== requestedRole) {
-        setRole(grantedRole);
+        applyRole(grantedRole);
         setSearchParams({ role: grantedRole }, { replace: true });
       } else {
-        setRole(requestedRole);
+        applyRole(requestedRole);
       }
     });
 
@@ -360,7 +369,7 @@ export default function Presentation() {
     // effect, so the tab rejoins as a viewer and won't grab control back on
     // its next reconnect.
     socket.on("controller_replaced", () => {
-      setRole("viewer");
+      applyRole("viewer");
       setSearchParams({ role: "viewer" }, { replace: true });
     });
 
@@ -397,7 +406,21 @@ export default function Presentation() {
       socket.off("session_ended");
       socket.disconnect();
     };
-  }, [id, local, requestedRole, navigate, setSearchParams, applyCommit, applyUndo, applyClear]);
+  }, [id, local, requestedRole, navigate, setSearchParams, applyRole, applyCommit, applyUndo, applyClear]);
+
+  // Report the settled role to analytics. The `?role=` query param is already
+  // in every tracked URL, but Umami's Pages report keys on the path alone, so
+  // viewers and controllers collapse into one `/s/:id` row. A custom event
+  // gives them their own breakdown. Fires once per role: reconnects re-settle
+  // the same value, and only a real change (a controller demoted by
+  // controller_replaced) counts as a second data point.
+  const trackedRoleRef = useRef("");
+  useEffect(() => {
+    if (!settledRole) return;
+    if (trackedRoleRef.current === settledRole) return;
+    trackedRoleRef.current = settledRole;
+    track("session-role", { role: settledRole, mode: local ? "local" : "server" });
+  }, [settledRole, local]);
 
   // Set when a state_sync adopts media state alongside a slide change, so the
   // reset below doesn't immediately discard it.

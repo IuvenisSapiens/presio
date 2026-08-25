@@ -39,6 +39,12 @@ interface Props {
   onStrokeCommit?: (stroke: Stroke) => void;
   /** Laser position received from the other side (viewer windows). */
   remoteLaser?: LaserPoint | null;
+  /**
+   * True while a pinch/pan gesture owns the slide surface. The gesture steals
+   * pointer capture, so any stroke in progress is dropped and new input is
+   * ignored until the fingers lift.
+   */
+  gestureActive?: boolean;
 }
 
 // Transparent layer stretched over the slide's content rect. It renders the
@@ -56,6 +62,7 @@ export function AnnotationOverlay({
   onStrokeProgress,
   onStrokeCommit,
   remoteLaser,
+  gestureActive = false,
 }: Props) {
   const [rect, setRect] = useState<ContentRect | null>(null);
   const [localLaser, setLocalLaser] = useState<LaserPoint | null>(null);
@@ -119,16 +126,18 @@ export function AnnotationOverlay({
     redraw();
   }, [redraw]);
 
-  const toNormalized = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>): LaserPoint => {
-      const box = e.currentTarget.getBoundingClientRect();
-      return {
-        x: clamp01((e.clientX - box.left) / box.width),
-        y: clamp01((e.clientY - box.top) / box.height),
-      };
-    },
-    []
-  );
+  // Map a pointer position to normalized slide coordinates. The overlay is laid
+  // out over the content rect, so its own client box already carries whatever
+  // transform sits above it (the pinch zoom lives on an ancestor wrapper) —
+  // normalizing against that box keeps drawing under the finger at any zoom.
+  const toNormalized = useCallback((e: React.PointerEvent<HTMLDivElement>): LaserPoint => {
+    const box = e.currentTarget.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) return { x: 0, y: 0 };
+    return {
+      x: clamp01((e.clientX - box.left) / box.width),
+      y: clamp01((e.clientY - box.top) / box.height),
+    };
+  }, []);
 
   const emitThrottled = useCallback((send: () => void) => {
     const now = Date.now();
@@ -145,8 +154,24 @@ export function AnnotationOverlay({
     onStrokeCommit?.(draft);
   }, [onStrokeCommit, onStrokeProgress]);
 
+  // A pinch takes pointer capture away from this overlay, so the stroke that
+  // started with the first finger never sees its pointerup. Drop it rather than
+  // committing a stray mark (or leaving a draft hanging around).
+  useEffect(() => {
+    if (!gestureActive) return;
+    // Syncing with the gesture, not deriving state: the dot has to disappear on
+    // the other side too, so this clears both ends of the laser.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLocalLaser(null);
+    onLaserMove?.(null);
+    if (!draftRef.current) return;
+    draftRef.current = null;
+    onStrokeProgress?.(null);
+    redraw();
+  }, [gestureActive, onLaserMove, onStrokeProgress, redraw]);
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!e.isPrimary) return;
+    if (!e.isPrimary || gestureActive) return;
     if (tool === "laser") {
       const pt = toNormalized(e);
       setLocalLaser(pt);
@@ -166,7 +191,7 @@ export function AnnotationOverlay({
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!e.isPrimary) return;
+    if (!e.isPrimary || gestureActive) return;
     if (tool === "laser") {
       const pt = toNormalized(e);
       setLocalLaser(pt);
