@@ -1,15 +1,17 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { getDocument } from "pdfjs-dist";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AccountControl } from "@/components/AccountControl";
 import { PresioLogo } from "@/components/PresioLogo";
 import { MobileNotice } from "@/components/MobileNotice";
 import { CodeBlock } from "@/components/CodeBlock";
-import { idbPut } from "@/lib/localStore";
-import { setSessionAuth } from "@/lib/utils";
+import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
+import { idbPut, idbList } from "@/lib/localStore";
+import { getSessionAuth, setSessionAuth } from "@/lib/utils";
+import { lsRemove, annotationsKey } from "@/lib/storage";
 import { track, sha256Hex } from "@/lib/analytics";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
 import { supabase } from "@/lib/supabaseClient";
@@ -196,8 +198,7 @@ function ScrollReveal({ children, className = "" }: { children: React.ReactNode;
   );
 }
 
-function Cue({ cue, index, flip }: { cue: (typeof CUES)[number]; index: number; flip: boolean }) {
-  return (
+function Cue({ cue, index, flip }: { cue: (typeof CUES)[number]; index: number; flip: boolean }) {  return (
     <ScrollReveal className="grid grid-cols-1 items-center gap-7 md:grid-cols-2 md:gap-16">
       <div className={flip ? "md:order-2" : "md:order-1"}>
         <div className="mb-3.5 flex items-center gap-2.5 font-mono text-xs font-semibold uppercase tracking-wide text-[var(--home2-accent)]">
@@ -216,6 +217,71 @@ function Cue({ cue, index, flip }: { cue: (typeof CUES)[number]; index: number; 
   );
 }
 
+// Compact date for the recents list: "Aug 25" this year, otherwise "Aug 25, 2025".
+function formatRecentDate(ts: number): string {
+  const d = new Date(ts);
+  const opts: Intl.DateTimeFormatOptions =
+    d.getFullYear() === new Date().getFullYear()
+      ? { month: "short", day: "numeric" }
+      : { month: "short", day: "numeric", year: "numeric" };
+  return d.toLocaleDateString(undefined, opts);
+}
+
+// One row in the recents list: everything this browser could control. Local
+// decks come from IndexedDB; synced ones are discovered through the controller
+// credentials this browser holds (created+synced here, or taken over via
+// passphrase) — the IndexedDB record is deleted on claim, so without the
+// credential scan a shared deck would vanish from the list.
+interface RecentDeck {
+  id: string;
+  filename: string;
+  totalSlides: number;
+  /** Present only for local decks (IndexedDB creation time). */
+  createdAt: number | null;
+  kind: "local" | "synced";
+}
+
+const SESSION_KEY_RE = /^session_([A-Z0-9]{6})$/;
+
+async function listControlledSynced(): Promise<RecentDeck[]> {
+  const ids: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      const m = key.match(SESSION_KEY_RE);
+      if (m && localStorage.getItem(key)?.includes("controllerToken")) ids.push(m[1]);
+    }
+  } catch {
+    return []; // storage unavailable (private mode): nothing to scan
+  }
+  const out: RecentDeck[] = [];
+  // A browser only controls a handful of decks; a small sequential scan keeps
+  // this trivial and ordered by insertion (most recent credential first).
+  for (const id of ids.slice(0, 20)) {
+    try {
+      const res = await fetch(`/api/sessions/${id}`);
+      if (!res.ok) {
+        // Ended or expired server-side: the stored credential is dead weight.
+        lsRemove(`session_${id}`);
+        continue;
+      }
+      const s = await res.json();
+      if (s.local) continue; // local rows are listed from IndexedDB above
+      out.push({
+        id,
+        filename: s.filename,
+        totalSlides: s.total_slides,
+        createdAt: null,
+        kind: "synced",
+      });
+    } catch {
+      // Offline or server unreachable: skip rather than block the page.
+    }
+  }
+  return out;
+}
+
 export default function Home() {
   const navigate = useNavigate();
   const [dragging, setDragging] = useState(false);
@@ -231,6 +297,125 @@ export default function Home() {
   const [scrolled, setScrolled] = useState(false);
   const [exampleBusy, setExampleBusy] = useState<"typst" | "latex" | null>(null);
   const [exampleError, setExampleError] = useState("");
+
+  // Presentations this browser could control, with an in-place "Replace PDF"
+  // action so a recompiled deck keeps its code instead of minting a new one.
+  const [recents, setRecents] = useState<RecentDeck[]>([]);
+  const replaceInputRef = useRef<HTMLInputElement | null>(null);
+  const [replaceTarget, setReplaceTarget] = useState<RecentDeck | null>(null);
+  const [replaceFile, setReplaceFile] = useState<File | null>(null);
+  const [replacing, setReplacing] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const locals = await idbList()
+        .then((rs) =>
+          rs.map<RecentDeck>((r) => ({
+            id: r.id,
+            filename: r.filename,
+            totalSlides: r.totalSlides,
+            createdAt: r.createdAt,
+            kind: "local",
+          }))
+        )
+        .catch(() => [] as RecentDeck[]);
+      const controlled = await listControlledSynced();
+      if (cancelled) return;
+      // Locals first (they carry a creation date), then synced decks this
+      // browser holds credentials for; dedupe by id, preferring the local copy.
+      const byId = new Map<string, RecentDeck>();
+      for (const deck of [...locals, ...controlled]) {
+        if (!byId.has(deck.id)) byId.set(deck.id, deck);
+      }
+      setRecents([...byId.values()]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uploading]);
+
+  const pickReplace = useCallback((target: RecentDeck) => {
+    setReplaceFile(null);
+    setReplaceTarget(target);
+    replaceInputRef.current?.click();
+  }, []);
+
+  const confirmReplace = useCallback(async () => {
+    if (!replaceTarget || !replaceFile || replacing) return;
+    setReplacing(true);
+    setError("");
+    try {
+      const buf = await replaceFile.arrayBuffer();
+      // Snapshot the bytes before getDocument() transfers the buffer to the
+      // pdf.js worker and detaches it (same ordering as upload()).
+      const blob = new Blob([buf], { type: "application/pdf" });
+      const doc = await getDocument({ data: new Uint8Array(buf) }).promise;
+      const totalSlides = doc.numPages;
+      doc.destroy();
+      const filename = replaceFile.name.replace(/\.pdf$/i, "");
+      if (replaceTarget.kind === "local") {
+        try {
+          await idbPut({
+            id: replaceTarget.id,
+            filename,
+            totalSlides,
+            blob,
+            createdAt: replaceTarget.createdAt ?? Date.now(),
+          });
+        } catch {
+          throw new Error(
+            "Couldn't update the presentation in this browser. Private/incognito mode isn't supported — please use a normal window."
+          );
+        }
+      } else {
+        // Synced deck: overwrite its server copy. The controller token this
+        // browser holds authorizes the write; a logged-in owner token is
+        // attached too when present (the server accepts either).
+        const { controllerToken } = getSessionAuth(replaceTarget.id);
+        if (!controllerToken) {
+          throw new Error("This browser isn't the controller for this presentation");
+        }
+        const headers: Record<string, string> = { "x-controller-token": controllerToken };
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData.session) {
+          headers.Authorization = `Bearer ${sessionData.session.access_token}`;
+        }
+        const form = new FormData();
+        form.append("pdf", blob, `${filename}.pdf`);
+        form.append("filename", filename);
+        const res = await fetch(`/api/sessions/${replaceTarget.id}/pdf`, {
+          method: "POST",
+          headers,
+          body: form,
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || "Failed to replace the PDF");
+        }
+      }
+      // Drawings are keyed by slide number; a replaced deck invalidates them.
+      lsRemove(annotationsKey(replaceTarget.id));
+      let sha256: string | undefined;
+      try {
+        sha256 = await sha256Hex(buf);
+      } catch {
+        // No crypto.subtle (plain-http origins): track without a fingerprint.
+      }
+      track("deck-replace", {
+        filename,
+        sha256,
+        size: replaceFile.size,
+        slides: totalSlides,
+        mode: replaceTarget.kind === "local" ? "local" : "server",
+      });
+      navigate(`/s/${replaceTarget.id}?role=controller`);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to replace the PDF");
+    } finally {
+      setReplacing(false);
+    }
+  }, [replaceTarget, replaceFile, replacing, navigate]);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -553,6 +738,53 @@ export default function Home() {
                   />
                 ))}
               </div>
+
+              {recents.length > 0 && (
+                <div className="mt-8">
+                  <div className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                    Recent presentations
+                  </div>
+                  <ul className="space-y-1.5">
+                    {recents.map((r) => (
+                      <li
+                        key={r.id}
+                        className="flex items-center gap-2 rounded-md border px-3 py-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{r.filename}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {r.totalSlides} {r.totalSlides === 1 ? "slide" : "slides"}
+                            {" · "}
+                            <span
+                              className={r.kind === "synced" ? "text-(--home2-accent)" : undefined}
+                            >
+                              {r.kind === "synced" ? "shared" : "local"}
+                            </span>
+                            {r.createdAt !== null && ` · ${formatRecentDate(r.createdAt)}`}
+                          </p>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => navigate(`/s/${r.id}?role=controller`)}
+                        >
+                          Open
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title="Swap in a recompiled PDF — keeps this presentation's code"
+                          disabled={replacing}
+                          onClick={() => pickReplace(r)}
+                        >
+                          <RefreshCw size={14} />
+                          Replace
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           </div>
 
@@ -752,6 +984,28 @@ Hello world.
           </div>
         </ScrollReveal>
       </footer>
+
+      {replaceTarget && replaceFile && (
+        <ConfirmReplaceDialog
+          onConfirm={confirmReplace}
+          onClose={() => { setReplaceTarget(null); setReplaceFile(null); }}
+        />
+      )}
+
+      {/* Hidden picker for the recents list' Replace action. Kept outside the
+          list so a cancelled picker simply leaves nothing to confirm. */}
+      <input
+        ref={replaceInputRef}
+        type="file"
+        accept=".pdf,application/pdf"
+        className="hidden"
+        data-testid="recents-replace-input"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) setReplaceFile(file);
+          e.target.value = "";
+        }}
+      />
 
       <MobileNotice />
     </div>

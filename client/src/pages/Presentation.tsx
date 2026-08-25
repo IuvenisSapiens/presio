@@ -1,19 +1,20 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams, useSearchParams, useNavigate, Link } from "react-router-dom";
 import type { PDFDocumentProxy } from "pdfjs-dist";
+import { getDocument } from "pdfjs-dist";
 import { loadPdf, loadPdfData, renderPage, clearCache } from "@/lib/pdf";
 import { loadDeckInfo, type Deck, type DeckInfo } from "@/lib/deck";
 import { setSlideNotes } from "@/lib/notesAttach";
 import { defaultAudioState, isMutedForRole, type MediaState, type MediaTimeSync, type AudioState } from "@/lib/media";
 import { hasAnyStrokes, parseDrawing, serializeDrawing, type AnnotationsBySlide, type LaserPoint, type Stroke } from "@/lib/annotations";
-import { lsGet, lsSet, annotationsKey } from "@/lib/storage";
+import { lsGet, lsSet, lsRemove, annotationsKey } from "@/lib/storage";
 import { socket } from "@/lib/socket";
 import { startClockSync } from "@/lib/clock";
 import { supabase } from "@/lib/supabaseClient";
 import { authEnabled } from "@/lib/authMode";
 import { getSessionAuth, endSession } from "@/lib/utils";
 import { idbGet, idbPut, idbDelete } from "@/lib/localStore";
-import { track } from "@/lib/analytics";
+import { track, sha256Hex } from "@/lib/analytics";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ControllerView } from "./ControllerView";
@@ -104,6 +105,11 @@ export default function Presentation() {
 
   stateRef.current = { currentSlide, totalSlides, blanked, showCode, annotations, mediaState, audioState };
 
+  // Mirror of pdfUrl for callbacks that must not re-subscribe the socket
+  // effect when it changes (a deck replace rewrites it on local sessions).
+  const pdfUrlRef = useRef("");
+  pdfUrlRef.current = pdfUrl;
+
   // Persist the controller's drawings across reloads.
   useEffect(() => {
     if (role === "controller") lsSet(annotationsKey(id!), annotations);
@@ -122,6 +128,50 @@ export default function Presentation() {
   const applyClear = useCallback((slide: number) => {
     setAnnotations((prev) => (prev[slide]?.length ? { ...prev, [slide]: [] } : prev));
   }, []);
+
+  // Swap in a replacement deck that arrived over the wire — socket
+  // `deck_updated` for synced sessions or a BroadcastChannel `deck_update`
+  // for local ones. Drawings are dropped wholesale: they are keyed by slide
+  // number and the new document renumbers every slide after an insertion.
+  // Slide clamping needs no extra work here: the deckInfo effect adopts the
+  // new document's page count once it loads.
+  const applyDeckUpdate = useCallback(
+    ({ filename, totalSlides }: { filename: string; totalSlides: number }) => {
+      setFilename(filename);
+      setAnnotations({});
+      lsRemove(annotationsKey(id!));
+      setTotalSlides(totalSlides);
+      setCurrentSlide((slide) => Math.min(Math.max(slide, 1), totalSlides));
+      (async () => {
+        try {
+          if (local) {
+            // Same-browser windows read the fresh record straight from IndexedDB.
+            const rec = await idbGet(id!);
+            if (!rec) return;
+            const bytes = new Uint8Array(await rec.blob.arrayBuffer());
+            const doc = await loadPdfData(bytes);
+            setPdf(doc);
+            const url = URL.createObjectURL(rec.blob);
+            if (localUrlRef.current) URL.revokeObjectURL(localUrlRef.current);
+            localUrlRef.current = url;
+            setPdfUrl(url);
+          } else {
+            // The stored object path doesn't change on replace, so bust any
+            // cached copy along the way before re-fetching.
+            clearCache();
+            const base = pdfUrlRef.current;
+            const busted = `${base}${base.includes("?") ? "&" : "?"}v=${Date.now()}`;
+            const doc = await loadPdf(busted);
+            setPdf(doc);
+          }
+        } catch {
+          // Keep showing the previous deck rather than a broken screen; the
+          // stored row already describes the new one and a reload recovers.
+        }
+      })();
+    },
+    [local, id]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -224,6 +274,7 @@ export default function Presentation() {
       else if (type === "stroke_undo") applyUndo(payload.slide);
       else if (type === "annotations_clear") applyClear(payload.slide);
       else if (type === "annotations_state") setAnnotations(payload);
+      else if (type === "deck_update") applyDeckUpdate(payload);
       else if (type === "session_ended") navigate("/", { replace: true });
       else if (type === "state_request") {
         // Controller is the source of truth for a local session; reply so a
@@ -393,6 +444,12 @@ export default function Presentation() {
       setAnnotations(bySlide);
     });
 
+    // The controller replaced the deck (server broadcast from the replace
+    // endpoint); reload the new document under the same session.
+    socket.on("deck_updated", (payload: { filename: string; totalSlides: number }) => {
+      applyDeckUpdate(payload);
+    });
+
     // Another window took controllership (same token, e.g. a second tab).
     // Demote this one to a viewer — updating the role param re-runs this
     // effect, so the tab rejoins as a viewer and won't grab control back on
@@ -431,12 +488,13 @@ export default function Presentation() {
       socket.off("stroke_undo");
       socket.off("annotations_clear");
       socket.off("annotations_state");
+      socket.off("deck_updated");
       socket.off("controller_replaced");
       socket.off("error");
       socket.off("session_ended");
       socket.disconnect();
     };
-  }, [id, local, requestedRole, navigate, setSearchParams, applyRole, applyCommit, applyUndo, applyClear]);
+  }, [id, local, requestedRole, navigate, setSearchParams, applyRole, applyCommit, applyUndo, applyClear, applyDeckUpdate]);
 
   // Report the settled role to analytics. The `?role=` query param is already
   // in every tracked URL, but Umami's Pages report keys on the path alone, so
@@ -543,6 +601,21 @@ export default function Presentation() {
     navigate("/", { replace: true });
   }, [local, id, navigate]);
 
+  // Authorization for rewriting a synced deck's stored PDF. A logged-in owner
+  // sends their bearer token; a presenter holding only the controller token
+  // (anonymous creation, local-mode server, passphrase-granted controllers)
+  // sends that — the server accepts both, exactly like ending a session.
+  const pdfWriteAuth = useCallback(async (): Promise<Record<string, string>> => {
+    if (authEnabled) {
+      const { data } = await supabase.auth.getSession();
+      const accessToken = data.session?.access_token;
+      if (accessToken) return { Authorization: `Bearer ${accessToken}` };
+    }
+    const { controllerToken } = getSessionAuth(id!);
+    if (!controllerToken) throw new Error("This browser isn't the controller for this presentation");
+    return { "x-controller-token": controllerToken };
+  }, [id]);
+
   // Persist edited speaker notes by writing them back into the PDF as a JSON
   // sidecar (matching presio's format), then swap in the updated document so
   // further edits build on it. Local sessions update IndexedDB; synced ones
@@ -563,20 +636,8 @@ export default function Presentation() {
         const rec = await idbGet(id!);
         if (rec) await idbPut({ ...rec, blob });
       } else {
-        // Synced deck: re-upload to its server copy. Hosted mode authorizes
-        // with the owner's login; local/offline mode has no accounts, so
-        // authorize with the controller token this browser holds.
-        let authHeaders: Record<string, string>;
-        if (authEnabled) {
-          const { data } = await supabase.auth.getSession();
-          const token = data.session?.access_token;
-          if (!token) throw new Error("Please log in again");
-          authHeaders = { Authorization: `Bearer ${token}` };
-        } else {
-          const { controllerToken } = getSessionAuth(id!);
-          if (!controllerToken) throw new Error("This browser isn't the controller for this presentation");
-          authHeaders = { "x-controller-token": controllerToken };
-        }
+        // Synced deck: re-upload to its server copy.
+        const authHeaders = await pdfWriteAuth();
         const form = new FormData();
         form.append("pdf", blob, `${filename || "presentation"}.pdf`);
         const res = await fetch(`/api/sessions/${id}/pdf`, {
@@ -609,7 +670,65 @@ export default function Presentation() {
         setPdfUrl(url);
       }
     },
-    [pdf, local, id, filename]
+    [pdf, local, id, filename, pdfWriteAuth]
+  );
+
+  // Replace this presentation's PDF with a new file, keeping the session id,
+  // code, controller token and passphrase. Mirrors saveNotes' local/synced
+  // fork: local decks swap the IndexedDB record in place (nothing uploads);
+  // synced ones re-upload to their stored object and let the server's
+  // deck_updated broadcast drive the document swap on every client.
+  const replacePdf = useCallback(
+    async (file: File) => {
+      if (local === null) return;
+      const buf = await file.arrayBuffer();
+      // Snapshot before pdf.js transfers the buffer away (see Home.upload).
+      const blob = new Blob([buf], { type: "application/pdf" });
+      let sha256: string | undefined;
+      try {
+        sha256 = await sha256Hex(buf);
+      } catch {
+        // No crypto.subtle (plain-http origins): track without a fingerprint.
+      }
+      const doc = await getDocument({ data: new Uint8Array(buf) }).promise;
+      const totalSlides = doc.numPages;
+      doc.destroy();
+      const filename = file.name.replace(/\.pdf$/i, "");
+
+      if (local) {
+        const rec = await idbGet(id!);
+        if (!rec) throw new Error("This presentation is no longer in this browser");
+        await idbPut({ ...rec, blob, filename, totalSlides });
+        channelRef.current?.postMessage({
+          type: "deck_update",
+          payload: { filename, totalSlides },
+        });
+        await applyDeckUpdate({ filename, totalSlides });
+      } else {
+        const authHeaders = await pdfWriteAuth();
+        const form = new FormData();
+        form.append("pdf", blob, `${filename}.pdf`);
+        form.append("filename", filename);
+        const res = await fetch(`/api/sessions/${id}/pdf`, {
+          method: "POST",
+          headers: authHeaders,
+          body: form,
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || "Failed to replace the PDF");
+        }
+      }
+
+      track("deck-replace", {
+        filename,
+        sha256,
+        size: file.size,
+        slides: totalSlides,
+        mode: local ? "local" : "server",
+      });
+    },
+    [local, id, applyDeckUpdate, pdfWriteAuth]
   );
 
   const onMediaControl = useCallback(
@@ -821,6 +940,7 @@ export default function Presentation() {
       onEnd={endPresentation}
       onSynced={() => setLocal(false)}
       onSaveNotes={saveNotes}
+      onReplacePdf={replacePdf}
       currentCanvasRef={currentCanvasRef}
       blanked={blanked}
       onBlankToggle={() => {

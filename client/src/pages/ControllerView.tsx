@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn, getSessionAuth } from "@/lib/utils";
-import { Settings, Check, Option, Plus, Share2, ExternalLink, QrCode, Save, FolderOpen, PenLine } from "lucide-react";
+import { Settings, Check, Option, Plus, Share2, ExternalLink, QrCode, Save, FolderOpen, PenLine, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Separator } from "@/components/ui/separator";
@@ -32,6 +32,7 @@ import { ControllerDashboard, type CardEntry } from "@/components/controller/Con
 import { ControllerStack } from "@/components/controller/ControllerStack";
 import { ShareDialog } from "@/components/controller/ShareDialog";
 import { ConfirmEndDialog } from "@/components/controller/ConfirmEndDialog";
+import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSlideTapNav } from "@/hooks/useSlideTapNav";
 import {
@@ -72,6 +73,7 @@ interface ControllerViewProps {
   onEnd: () => void;
   onSynced: () => void;
   onSaveNotes: (slide: number, notes: string) => Promise<void>;
+  onReplacePdf: (file: File) => Promise<void>;
   currentCanvasRef: React.RefObject<HTMLDivElement | null>;
   blanked: boolean;
   onBlankToggle: () => void;
@@ -102,6 +104,7 @@ export function ControllerView({
   onEnd,
   onSynced,
   onSaveNotes,
+  onReplacePdf,
   currentCanvasRef,
   blanked,
   onBlankToggle,
@@ -193,6 +196,28 @@ export function ControllerView({
   // Hidden file input for loading a saved drawing from Settings.
   const drawingFileRef = useRef<HTMLInputElement | null>(null);
 
+  // Deck replacement: pick a PDF, confirm, then hand it to the orchestrator.
+  // The File is held in state between the picker and the confirmation dialog.
+  const replaceFileRef = useRef<HTMLInputElement | null>(null);
+  const [replaceCandidate, setReplaceCandidate] = useState<File | null>(null);
+  const [replacing, setReplacing] = useState(false);
+  const onReplacePicked = useCallback((file: File | undefined) => {
+    if (file) setReplaceCandidate(file);
+  }, []);
+  const confirmReplace = useCallback(async () => {
+    const file = replaceCandidate;
+    if (!file || replacing) return;
+    setReplacing(true);
+    try {
+      await onReplacePdf(file);
+      setReplaceCandidate(null);
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : "Failed to replace the PDF");
+    } finally {
+      setReplacing(false);
+    }
+  }, [replaceCandidate, replacing, onReplacePdf]);
+
   const { user } = useAuth();
   const loggedIn = !!user;
   // Drawing and notes editing are purely local (canvas state / IndexedDB), so
@@ -215,9 +240,8 @@ export function ControllerView({
     // Only prompt if the presenter hasn't already opened a viewer for this
     // presentation (the flag survives controller refreshes).
     if (lsGetString(viewerOpenedKey(id)) === "true") return;
-    // One-time mount prompt (re-armed when onboarding finishes); the single
-    // extra render the rule warns about is intentional and harmless here.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    // One-time mount prompt (re-armed when onboarding finishes); the extra
+    // render from setting state in the effect is intentional and harmless.
     setViewerPromptOpen(true);
   }, [id, isMobile, onboardingOpen]);
 
@@ -436,6 +460,7 @@ export function ControllerView({
       onToggleCode={onShowCodeToggle}
       onShowPassphrase={() => setPassphraseDialogOpen(true)}
       onSwitchToViewer={() => navigate(`/s/${id}?role=viewer`, { replace: true })}
+      onReplaceClick={() => replaceFileRef.current?.click()}
       onEndClick={() => setConfirmEnd(true)}
     />
   );
@@ -594,6 +619,28 @@ export function ControllerView({
           <Separator />
 
           <section className="space-y-2">
+            <h3 className="text-sm font-medium">Presentation</h3>
+            <p className="text-xs text-muted-foreground">
+              Swap in a recompiled PDF. The code, link and passphrase stay the
+              same; drawings are cleared and Presio-edited notes are lost.
+            </p>
+            <div>
+              <Button
+                size="sm"
+                variant="outline"
+                data-testid="deck-replace"
+                disabled={replacing}
+                onClick={() => replaceFileRef.current?.click()}
+              >
+                <RefreshCw size={14} className={cn("mr-1", replacing && "animate-spin")} />
+                {replacing ? "Replacing…" : "Replace PDF…"}
+              </Button>
+            </div>
+          </section>
+
+          <Separator />
+
+          <section className="space-y-2">
             <h3 className="text-sm font-medium">Drawing</h3>
             <p className="text-xs text-muted-foreground">
               Save the drawings made on the slides to a file, or load a previously saved drawing.
@@ -684,6 +731,27 @@ export function ControllerView({
       {confirmEnd && (
         <ConfirmEndDialog local={local} onConfirm={onEnd} onClose={() => setConfirmEnd(false)} />
       )}
+
+      {replaceCandidate && (
+        <ConfirmReplaceDialog
+          onConfirm={confirmReplace}
+          onClose={() => { if (!replacing) setReplaceCandidate(null); }}
+        />
+      )}
+
+      {/* Always mounted: both the desktop Settings button and the mobile menu
+          item trigger this picker, which then opens the confirm dialog. */}
+      <input
+        ref={replaceFileRef}
+        type="file"
+        accept=".pdf,application/pdf"
+        className="hidden"
+        data-testid="deck-replace-input"
+        onChange={(e) => {
+          onReplacePicked(e.target.files?.[0]);
+          e.target.value = "";
+        }}
+      />
 
       {passphraseDialogOpen && passphrase && (
         <DialogOverlay onClose={() => setPassphraseDialogOpen(false)} maxWidth="max-w-xs">
