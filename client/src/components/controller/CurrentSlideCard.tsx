@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, useRef } from "react";
 import {
   Play,
   Pause,
@@ -9,9 +9,11 @@ import {
   Mic,
   Users,
   Eye,
+  ZoomOut,
 } from "lucide-react";
 import { MediaOverlay, type MediaState, type AudioState, type AudioTarget } from "@/components/MediaOverlay";
 import { AnnotationOverlay } from "@/components/AnnotationOverlay";
+import { useSlidePinchZoom } from "@/hooks/useSlidePinchZoom";
 import { AnnotationToolbar } from "@/components/AnnotationToolbar";
 import { DEFAULT_PEN_STYLE, type LaserPoint, type PenStyle, type Stroke, type Tool } from "@/lib/annotations";
 import { Button } from "@/components/ui/button";
@@ -47,6 +49,8 @@ interface Props {
   onStrokeCommit?: (stroke: Stroke) => void;
   onStrokeUndo?: () => void;
   onAnnotationsClear?: () => void;
+  /** Reports whether a pinch gesture is running or the slide is zoomed in. */
+  onZoomActiveChange?: (active: boolean) => void;
 }
 
 const TARGET_LABEL: Record<AudioTarget, string> = {
@@ -83,6 +87,7 @@ export const CurrentSlideCard = forwardRef<HTMLDivElement, Props>(
       onStrokeCommit,
       onStrokeUndo,
       onAnnotationsClear,
+      onZoomActiveChange,
     },
     ref
   ) => {
@@ -92,10 +97,40 @@ export const CurrentSlideCard = forwardRef<HTMLDivElement, Props>(
     const hasVideo = mediaPlacements.some(isPlayable);
     const showAudio = showControls && hasVideo && !!audioState && !!onAudioChange;
 
+    // Pinch to zoom the composed slide (rendered page + annotations move
+    // together). Local to this device. With a drawing tool active the first
+    // finger still draws, but two fingers always pinch and pan.
+    const surfaceRef = useRef<HTMLDivElement | null>(null);
+    const { zoom, gesturing, reset: resetZoom } = useSlidePinchZoom(surfaceRef, {
+      drawing: tool !== "none",
+      onActiveChange: onZoomActiveChange,
+    });
+
     return (
       <div className="h-full flex flex-col gap-1">
-        <div className="flex-1 min-h-0 relative rounded overflow-hidden bg-white select-none [-webkit-touch-callout:none]">
-          <div ref={ref} className="absolute inset-0" />
+        <div
+          ref={surfaceRef}
+          className="flex-1 min-h-0 relative rounded overflow-hidden bg-white select-none [-webkit-touch-callout:none] touch-none"
+        >
+          <div
+            className="absolute inset-0 will-change-transform"
+            style={{
+              transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`,
+              transformOrigin: "0 0",
+            }}
+          >
+            <div ref={ref} className="absolute inset-0" />
+            <AnnotationOverlay
+              containerRef={ref as React.RefObject<HTMLDivElement | null>}
+              tool={tool}
+              penStyle={penStyle}
+              strokes={strokes}
+              onLaserMove={onLaserMove}
+              onStrokeProgress={onStrokeProgress}
+              onStrokeCommit={onStrokeCommit}
+              gestureActive={gesturing}
+            />
+          </div>
           {mediaState && mediaPlacements.length > 0 && (
             <MediaOverlay
               canvasContainerRef={ref as React.RefObject<HTMLDivElement | null>}
@@ -106,15 +141,6 @@ export const CurrentSlideCard = forwardRef<HTMLDivElement, Props>(
               role="controller"
             />
           )}
-          <AnnotationOverlay
-            containerRef={ref as React.RefObject<HTMLDivElement | null>}
-            tool={tool}
-            penStyle={penStyle}
-            strokes={strokes}
-            onLaserMove={onLaserMove}
-            onStrokeProgress={onStrokeProgress}
-            onStrokeCommit={onStrokeCommit}
-          />
           {toolbarVisible && onToolChange && onPenStyleChange && (
             <AnnotationToolbar
               tool={tool}
@@ -125,6 +151,18 @@ export const CurrentSlideCard = forwardRef<HTMLDivElement, Props>(
               onUndo={onStrokeUndo ?? (() => {})}
               onClear={onAnnotationsClear ?? (() => {})}
             />
+          )}
+          {zoom.scale > 1 && (
+            <Button
+              type="button"
+              size="icon-sm"
+              onClick={resetZoom}
+              className="absolute right-2 bottom-2 z-10 shadow-md"
+              title="Back to fit"
+              aria-label="Back to fit"
+            >
+              <ZoomOut className="size-4" />
+            </Button>
           )}
         </div>
         {showControls && (

@@ -33,9 +33,19 @@ name: PR preview
 on:
   pull_request:
     types: [opened, reopened, synchronize, closed]
+  # Manual redeploy for when a push doesn't reach Actions (a missed
+  # `synchronize` event leaves the preview running the previous commit) or a
+  # deploy needs repeating after a host-side fix. Always deploys the current
+  # head of `pull/<pr>/head`, so it can't resurrect a stale commit.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to (re)deploy
+        required: true
+        type: string
 
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
+  group: preview-${{ github.event.pull_request.number || inputs.pr }}
   cancel-in-progress: true
 
 env:
@@ -44,7 +54,9 @@ env:
 
 jobs:
   deploy:
-    if: github.event.action != 'closed' && !github.event.pull_request.head.repo.fork
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.action != 'closed' && !github.event.pull_request.head.repo.fork)
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write # sticky preview-URL comment
@@ -77,7 +89,7 @@ jobs:
           SSH_KEY: ${{ secrets.PREVIEW_SSH_KEY }}
           SSH_HOST: ${{ secrets.PREVIEW_SSH_HOST }}
           SSH_USER: ${{ secrets.PREVIEW_SSH_USER }}
-          PR: ${{ github.event.pull_request.number }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
@@ -114,9 +126,13 @@ jobs:
 
       - name: Comment preview URL
         uses: actions/github-script@v7
+        env:
+          # context.issue is empty on a manual dispatch, so the number comes
+          # from the event or the input, same as the deploy step.
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
         with:
           script: |
-            const n = context.issue.number;
+            const n = Number(process.env.PR);
             const body =
               `**Preview ready:** https://staging-pr-${n}.presio.xyz\n\n` +
               `Isolated local-mode deployment (SQLite, no shared state — login/sync flows live on staging). ` +
