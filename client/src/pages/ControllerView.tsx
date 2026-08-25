@@ -12,6 +12,7 @@ import { LoginDialog } from "@/components/LoginDialog";
 import { AccountControl } from "@/components/AccountControl";
 import { ControllerOnboarding } from "@/components/ControllerOnboarding";
 import { NewsletterDialog } from "@/components/NewsletterDialog";
+import { InstallPrompt } from "@/components/InstallPrompt";
 import { useNewsletterPrompt } from "@/lib/useNewsletterPrompt";
 import { DownloadButton } from "@/components/DownloadButton";
 import { hasCompletedControllerOnboarding } from "@/lib/onboarding";
@@ -743,6 +744,10 @@ export function ControllerView({
       )}
 
       {newsletter.open && <NewsletterDialog onClose={newsletter.close} />}
+
+      {/* Add-to-home-screen — touch devices using this phone/tablet as the
+          presenter's controller. Self-gates to touch + not-installed + once. */}
+      <InstallPrompt />
     </div>
   );
 }
