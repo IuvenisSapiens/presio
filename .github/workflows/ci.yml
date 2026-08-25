@@ -42,6 +42,13 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    env:
+      # The gitignored client/.env isn't available in CI; without a Supabase
+      # URL the login UI is compiled out entirely (see lib/authMode.ts). A
+      # placeholder enables the UI for e2e without talking to a real backend
+      # — rendering makes no network requests with it. Set at job level
+      # because Playwright's webServer command rebuilds the client itself.
+      VITE_SUPABASE_URL: https://e2e-placeholder.supabase.co
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -54,12 +61,6 @@ jobs:
           (cd server && npm ci)
       - name: Build client
         run: cd client && npm run build
-        env:
-          # The gitignored client/.env isn't available in CI; without a Supabase
-          # URL the login UI is compiled out entirely (see lib/authMode.ts). A
-          # placeholder enables the UI for e2e without talking to a real
-          # backend — rendering makes no network requests.
-          VITE_SUPABASE_URL: https://e2e-placeholder.supabase.co
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
       - name: Run E2E tests
