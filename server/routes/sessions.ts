@@ -410,9 +410,15 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
     }
   });
 
-  // Replace a synced presentation's PDF — used to persist edited speaker notes,
-  // which are written back into the PDF as embedded-file sidecars by the client.
-  // Only the authenticated owner may overwrite the stored file.
+  // Replace a synced presentation's PDF in place, keeping its id, code,
+  // controller token and passphrase. Two callers:
+  //
+  //   - Notes editing re-uploads the same document with an embedded sidecar
+  //     written by the client. No filename field → nothing announced.
+  //   - A deck replacement sends `filename`. The row's filename/slide count
+  //     follow the new document, the current slide is clamped into range,
+  //     drawings are dropped (they are keyed by slide number), and everyone
+  //     in the room gets `deck_updated` so they reload the new bytes live.
   app.post("/api/sessions/:id/pdf", uploadField("pdf"), async (req, res) => {
     try {
       // Hosted sessions are owned by a logged-in user; local mode has no auth,
@@ -431,7 +437,7 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
 
       const { data: row, error: rowError } = await supabase
         .from("sessions")
-        .select("id, local, pdf_path, user_id, controller_token")
+        .select("id, local, pdf_path, pdf_url, user_id, controller_token, filename, current_slide")
         .eq("id", req.params.id)
         .single();
       if (rowError || !row) {
@@ -450,6 +456,24 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
         return;
       }
 
+      let totalSlides: number;
+      try {
+        const doc = await getDocument({ data: new Uint8Array(file.buffer) }).promise;
+        totalSlides = doc.numPages;
+        doc.destroy();
+      } catch {
+        res.status(400).json({ error: "The file could not be read as a PDF" });
+        return;
+      }
+      if (!isValidTotalSlides(totalSlides)) {
+        res.status(400).json({ error: `PDF exceeds the ${MAX_TOTAL_SLIDES}-page limit` });
+        return;
+      }
+
+      const rawName = typeof req.body.filename === "string" ? req.body.filename.trim() : "";
+      const newFilename = rawName.replace(/\.pdf$/i, "");
+      const clampedSlide = Math.min(Math.max(row.current_slide ?? 1, 1), totalSlides);
+
       const { error: uploadError } = await supabase.storage
         .from("presentations")
         .upload(row.pdf_path, file.buffer, { contentType: "application/pdf", upsert: true });
@@ -458,7 +482,28 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
         return;
       }
 
-      res.json({ ok: true });
+      const update: Record<string, unknown> = {
+        total_slides: totalSlides,
+        current_slide: clampedSlide,
+      };
+      if (newFilename) update.filename = newFilename;
+      const { error: updateError } = await supabase
+        .from("sessions")
+        .update(update)
+        .eq("id", row.id);
+      if (updateError) {
+        res.status(500).json({ error: "Failed to update session" });
+        return;
+      }
+
+      // A real replacement announces itself; a notes re-save (no filename)
+      // stays silent so viewers aren't forced to re-download identical slides.
+      if (newFilename) {
+        socketState?.annotations.delete(String(req.params.id));
+        io.to(req.params.id).emit("deck_updated", { filename: newFilename, totalSlides });
+      }
+
+      res.json({ ok: true, totalSlides, filename: newFilename || row.filename });
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Internal server error" });

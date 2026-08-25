@@ -1,5 +1,5 @@
 import type { Deck } from "@/lib/deck";
-import { Menu, X, QrCode } from "lucide-react";
+import { Menu, X, QrCode, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { DownloadButton } from "@/components/DownloadButton";
@@ -19,6 +19,7 @@ export function ControllerMenu({
   onToggleCode,
   onShowPassphrase,
   onSwitchToViewer,
+  onReplaceClick,
   onEndClick,
 }: {
   open: boolean;
@@ -33,6 +34,7 @@ export function ControllerMenu({
   onToggleCode: () => void;
   onShowPassphrase: () => void;
   onSwitchToViewer: () => void;
+  onReplaceClick: () => void;
   onEndClick: () => void;
 }) {
   // Run an action after dismissing the drawer.
@@ -76,6 +78,10 @@ export function ControllerMenu({
               )}
               <Button variant="ghost" className="justify-start" onClick={act(onSwitchToViewer)}>
                 Switch to Viewer
+              </Button>
+              <Button variant="ghost" className="justify-start" onClick={act(onReplaceClick)}>
+                <RefreshCw size={16} className="mr-2" />
+                Replace PDF…
               </Button>
               <DownloadButton deck={deck} block />
               <div className="flex items-center justify-between px-4 py-2">
