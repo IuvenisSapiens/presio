@@ -26,6 +26,12 @@ export function ThumbnailsCard({
   }, [pdf]);
 
   useEffect(() => {
+    // A swapped document (notes edit, deck replace) invalidates every rendered
+    // thumbnail: drop the old canvases so the observer below re-renders them
+    // from the new document instead of keeping whatever was on screen.
+    thumbRefs.current.forEach((el) => {
+      el.innerHTML = "";
+    });
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
@@ -72,7 +78,10 @@ export function ThumbnailsCard({
           style={aspectRatio ? { aspectRatio, minWidth: 80 } : { minWidth: 80 }}
         >
           <div
-            ref={(el) => { if (el) thumbRefs.current.set(num, el); }}
+            ref={(el) => {
+              if (el) thumbRefs.current.set(num, el);
+              else thumbRefs.current.delete(num);
+            }}
             data-page={num}
             className="w-full h-full"
           />

@@ -5,7 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { nanoid } from "nanoid";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { isValidHttpsUrl, isValidTotalSlides, MAX_TOTAL_SLIDES } from "../validation.js";
-import { getBearerToken, resolveOptionalUserId, requireUser, safeEqual } from "../auth.js";
+import { getBearerToken, resolveOptionalUserId, safeEqual } from "../auth.js";
 import { isLocalMode } from "../local/mode.js";
 import { clearSessionState, type SocketState } from "../socket.js";
 import { baseUrl } from "../lib/baseUrl.js";
@@ -421,13 +421,10 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
   //     in the room gets `deck_updated` so they reload the new bytes live.
   app.post("/api/sessions/:id/pdf", uploadField("pdf"), async (req, res) => {
     try {
-      // Hosted sessions are owned by a logged-in user; local mode has no auth,
-      // so authorize by the controller token instead (see the claim route).
-      const user = isLocalMode ? null : await requireUser(supabase, req);
-      if (!isLocalMode && !user) {
-        res.status(401).json({ error: "Authentication required" });
-        return;
-      }
+      // Authorized either by the controller token — the same model as ending a
+      // session, so an anonymous presenter (and later agents/CLIs) can rewrite
+      // the deck they control — or, in hosted mode, by the logged-in owner.
+      const user = isLocalMode ? null : await resolveOptionalUserId(supabase, req);
 
       const file = req.file;
       if (!file || file.mimetype !== "application/pdf") {
@@ -444,9 +441,9 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
         res.status(404).json({ error: "Session not found" });
         return;
       }
-      const authorized = isLocalMode
-        ? safeEqual(req.get("x-controller-token") || "", row.controller_token)
-        : row.user_id === user!.id;
+      const authorized =
+        safeEqual(req.get("x-controller-token") || "", row.controller_token) ||
+        (!isLocalMode && !!user && row.user_id === user);
       if (!authorized) {
         res.status(403).json({ error: "Not authorized" });
         return;

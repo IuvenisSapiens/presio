@@ -601,6 +601,21 @@ export default function Presentation() {
     navigate("/", { replace: true });
   }, [local, id, navigate]);
 
+  // Authorization for rewriting a synced deck's stored PDF. A logged-in owner
+  // sends their bearer token; a presenter holding only the controller token
+  // (anonymous creation, local-mode server, passphrase-granted controllers)
+  // sends that — the server accepts both, exactly like ending a session.
+  const pdfWriteAuth = useCallback(async (): Promise<Record<string, string>> => {
+    if (authEnabled) {
+      const { data } = await supabase.auth.getSession();
+      const accessToken = data.session?.access_token;
+      if (accessToken) return { Authorization: `Bearer ${accessToken}` };
+    }
+    const { controllerToken } = getSessionAuth(id!);
+    if (!controllerToken) throw new Error("This browser isn't the controller for this presentation");
+    return { "x-controller-token": controllerToken };
+  }, [id]);
+
   // Persist edited speaker notes by writing them back into the PDF as a JSON
   // sidecar (matching presio's format), then swap in the updated document so
   // further edits build on it. Local sessions update IndexedDB; synced ones
@@ -621,20 +636,8 @@ export default function Presentation() {
         const rec = await idbGet(id!);
         if (rec) await idbPut({ ...rec, blob });
       } else {
-        // Synced deck: re-upload to its server copy. Hosted mode authorizes
-        // with the owner's login; local/offline mode has no accounts, so
-        // authorize with the controller token this browser holds.
-        let authHeaders: Record<string, string>;
-        if (authEnabled) {
-          const { data } = await supabase.auth.getSession();
-          const token = data.session?.access_token;
-          if (!token) throw new Error("Please log in again");
-          authHeaders = { Authorization: `Bearer ${token}` };
-        } else {
-          const { controllerToken } = getSessionAuth(id!);
-          if (!controllerToken) throw new Error("This browser isn't the controller for this presentation");
-          authHeaders = { "x-controller-token": controllerToken };
-        }
+        // Synced deck: re-upload to its server copy.
+        const authHeaders = await pdfWriteAuth();
         const form = new FormData();
         form.append("pdf", blob, `${filename || "presentation"}.pdf`);
         const res = await fetch(`/api/sessions/${id}/pdf`, {
@@ -667,7 +670,7 @@ export default function Presentation() {
         setPdfUrl(url);
       }
     },
-    [pdf, local, id, filename]
+    [pdf, local, id, filename, pdfWriteAuth]
   );
 
   // Replace this presentation's PDF with a new file, keeping the session id,
@@ -702,17 +705,7 @@ export default function Presentation() {
         });
         await applyDeckUpdate({ filename, totalSlides });
       } else {
-        let authHeaders: Record<string, string>;
-        if (authEnabled) {
-          const { data } = await supabase.auth.getSession();
-          const token = data.session?.access_token;
-          if (!token) throw new Error("Please log in again");
-          authHeaders = { Authorization: `Bearer ${token}` };
-        } else {
-          const { controllerToken } = getSessionAuth(id!);
-          if (!controllerToken) throw new Error("This browser isn't the controller for this presentation");
-          authHeaders = { "x-controller-token": controllerToken };
-        }
+        const authHeaders = await pdfWriteAuth();
         const form = new FormData();
         form.append("pdf", blob, `${filename}.pdf`);
         form.append("filename", filename);
@@ -735,7 +728,7 @@ export default function Presentation() {
         mode: local ? "local" : "server",
       });
     },
-    [local, id, applyDeckUpdate]
+    [local, id, applyDeckUpdate, pdfWriteAuth]
   );
 
   const onMediaControl = useCallback(
