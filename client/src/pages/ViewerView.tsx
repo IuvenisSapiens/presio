@@ -128,8 +128,11 @@ export function ViewerView({
   };
 
   return (
+    // Safe-area padding is a no-op in browser tabs (viewport-fit=cover is
+    // opted into only when installed — see main.tsx) and keeps the slide
+    // clear of the notch and home indicator in the installed app.
     <div
-      className="h-screen w-screen bg-black flex items-center justify-center relative"
+      className="h-screen w-screen bg-black flex items-center justify-center relative pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
       style={{ cursor: cursorVisible ? "default" : "none" }}
     >
       <div ref={canvasRef} data-testid="viewer-slide" data-slide={currentSlide} className="w-full h-full relative" />

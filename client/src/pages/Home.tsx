@@ -383,8 +383,10 @@ export default function Home() {
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
+      {/* env(safe-area-inset-top) is 0 in browser tabs; in the installed app
+          it drops the nav below the status bar. */}
       <nav
-        className={`sticky top-0 z-40 flex items-center justify-between px-6 py-4 backdrop-blur transition-colors ${scrolled ? "border-b bg-background/90" : "border-b border-transparent bg-background/70"
+        className={`sticky top-0 z-40 flex items-center justify-between px-6 pt-[calc(env(safe-area-inset-top)+1rem)] pb-4 backdrop-blur transition-colors ${scrolled ? "border-b bg-background/90" : "border-b border-transparent bg-background/70"
           }`}
       >
         <div className="flex items-center gap-2">

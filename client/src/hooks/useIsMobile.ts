@@ -30,3 +30,27 @@ export function useIsMobile(breakpoint = 768) {
 
   return isMobile && !forceDesktop;
 }
+
+// Touch-device detection for the first-visit prompts. Width alone misses
+// tablets: an iPad in landscape is 1024px wide (1366px on a Pro), well past
+// the 768px mobile breakpoint. The primary pointer being coarse (finger/stylus)
+// is the reliable signal that the screen is touch-first, holds in any
+// orientation, and stays false on desktop touch-laptops whose primary input is
+// a mouse/trackpad. Respects the same ?desktop=1 override as useIsMobile.
+export function isTouchDevice(): boolean {
+  if (forceDesktop) return false;
+  return window.matchMedia("(pointer: coarse)").matches;
+}
+
+export function useIsTouchDevice(): boolean {
+  const [isTouch, setIsTouch] = useState(isTouchDevice);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(pointer: coarse)");
+    const onChange = () => setIsTouch(isTouchDevice());
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  return isTouch;
+}
