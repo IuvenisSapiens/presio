@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { safeEqual } from "./auth.js";
 import {
   isValidSlideNumber,
+  isValidTotalSlides,
   sanitizeLaserPoint,
   sanitizeStroke,
   sanitizeAnnotations,
@@ -186,6 +187,18 @@ export function registerSocketHandlers(
 
     socket.on("sync_all", controllerOnly(socket, (sessionId) => {
       io.to(sessionId).emit("sync_all");
+    }));
+
+    // The controller derives the deck's page count from the PDF it actually
+    // loaded. A URL-backed deck is re-fetched on every load, so republishing
+    // the file with a different page count leaves the stored row stale —
+    // correct it here so slide validation and later joins match the document
+    // on screen.
+    socket.on("total_slides_change", controllerOnly(socket, async (sessionId, { totalSlides }: { totalSlides: number }) => {
+      if (!isValidTotalSlides(totalSlides)) return;
+      socket.data.totalSlides = totalSlides;
+      io.to(sessionId).emit("total_slides_update", { totalSlides });
+      await supabase.from("sessions").update({ total_slides: totalSlides }).eq("id", sessionId);
     }));
 
     socket.on("blank_toggle", controllerOnly(socket, (sessionId) => {
