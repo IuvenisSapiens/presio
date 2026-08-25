@@ -12,6 +12,7 @@ import { LoginDialog } from "@/components/LoginDialog";
 import { AccountControl } from "@/components/AccountControl";
 import { ControllerOnboarding } from "@/components/ControllerOnboarding";
 import { NewsletterDialog } from "@/components/NewsletterDialog";
+import { InstallPrompt } from "@/components/InstallPrompt";
 import { useNewsletterPrompt } from "@/lib/useNewsletterPrompt";
 import { DownloadButton } from "@/components/DownloadButton";
 import { hasCompletedControllerOnboarding } from "@/lib/onboarding";
@@ -222,9 +223,11 @@ export function ControllerView({
 
   // Tap the left/right half of the current slide to go back/forward on touch
   // devices. Disabled while a drawing tool is active so a stroke is never
-  // mistaken for a tap.
+  // mistaken for a tap, and while pinch-zoom is active so panning or lifting
+  // fingers off a zoomed slide never flips pages.
+  const [slideZoomActive, setSlideZoomActive] = useState(false);
   useSlideTapNav(currentCanvasRef, {
-    enabled: tool === "none",
+    enabled: tool === "none" && !slideZoomActive,
     onPrev: () => onGoTo(currentSlide - 1),
     onNext: () => onGoTo(currentSlide + 1),
   });
@@ -345,6 +348,7 @@ export function ControllerView({
           onStrokeCommit={onStrokeCommit}
           onStrokeUndo={onStrokeUndo}
           onAnnotationsClear={onAnnotationsClear}
+          onZoomActiveChange={setSlideZoomActive}
         />
       ),
       action: (
@@ -437,7 +441,15 @@ export function ControllerView({
   );
 
   return (
-    <div className={cn("bg-background flex flex-col", isMobile ? "h-dvh" : "h-screen")}>
+    // Safe-area padding is a no-op in browser tabs (viewport-fit=cover is
+    // opted into only when installed — see main.tsx) and keeps the header /
+    // nav bar clear of the notch and home indicator in the installed app.
+    <div
+      className={cn(
+        "bg-background flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]",
+        isMobile ? "h-dvh" : "h-screen"
+      )}
+    >
       <ControllerHeader
         id={id}
         local={local}
@@ -732,6 +744,10 @@ export function ControllerView({
       )}
 
       {newsletter.open && <NewsletterDialog onClose={newsletter.close} />}
+
+      {/* Add-to-home-screen — touch devices using this phone/tablet as the
+          presenter's controller. Self-gates to touch + not-installed + once. */}
+      <InstallPrompt />
     </div>
   );
 }
