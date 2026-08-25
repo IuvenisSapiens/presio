@@ -27,6 +27,17 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   })
 }
 
+// Installed app (added to the home screen) only: opt into the full-bleed
+// viewport so safe-area insets become available and the UI can span the
+// screen edge to edge. Browser tabs keep the plain meta, so nothing shifts
+// under the notch there. `navigator.standalone` covers older iOS Safari.
+const nav = navigator as Navigator & { standalone?: boolean }
+if (window.matchMedia('(display-mode: standalone)').matches || nav.standalone) {
+  document
+    .querySelector('meta[name="viewport"]')
+    ?.setAttribute('content', 'width=device-width, initial-scale=1.0, viewport-fit=cover')
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <Sentry.ErrorBoundary
