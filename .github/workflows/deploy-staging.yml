@@ -120,10 +120,23 @@ jobs:
           # throwaway data, not against prod. Idempotent: on a steady-state
           # deploy this just re-applies dbschema.sql and leaves the running
           # containers alone.
-          docker compose -p presio-staging-db --env-file "$ENV_FILE" -f docker-compose.staging-supabase.yml up -d --remove-orphans --wait
-          code=\$(docker inspect -f '{{.State.ExitCode}}' staging-presio-db-init)
-          if [ "\$code" != "0" ]; then
-            echo "::error::dbschema.sql failed against staging (exit \$code) -- see: docker logs staging-presio-db-init"
+          #
+          # No --wait here: it makes the compose CLI itself fail as soon as
+          # ANY container isn't in a "running/healthy" steady state, and
+          # presio-db-init is a one-shot job that's supposed to exit -- so
+          # --wait always errors out even on a clean apply. depends_on's own
+          # service_healthy/service_completed_successfully conditions already
+          # order the startup correctly; poll for db-init specifically.
+          docker compose -p presio-staging-db --env-file "$ENV_FILE" -f docker-compose.staging-supabase.yml up -d --remove-orphans
+          status=""
+          for i in \$(seq 1 60); do
+            status=\$(docker inspect -f '{{.State.Status}}' staging-presio-db-init 2>/dev/null || echo "missing")
+            [ "\$status" = "exited" ] && break
+            sleep 3
+          done
+          code=\$(docker inspect -f '{{.State.ExitCode}}' staging-presio-db-init 2>/dev/null || echo "unknown")
+          if [ "\$status" != "exited" ] || [ "\$code" != "0" ]; then
+            echo "::error::dbschema.sql failed against staging (status=\$status exit=\$code) -- see: docker logs staging-presio-db-init"
             docker logs --tail 40 staging-presio-db-init || true
             exit 1
           fi
