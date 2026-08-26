@@ -31,7 +31,32 @@
   <meta name="theme-color" content="#ffffff" />
   <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <meta name="apple-mobile-web-app-title" content="Presio" />
+  <!-- Installed app only: let web content run edge to edge under the status
+       bar. Ignored entirely in normal browser tabs. -->
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="mobile-web-app-capable" content="yes" />
+  <script>
+    // Apply the saved/system theme before first paint so reloads don't flash
+    // light-then-dark. Keep this logic in sync with src/lib/theme.tsx.
+    (function () {
+      try {
+        var stored = localStorage.getItem('theme');
+        var dark = stored === 'dark' || (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.classList.toggle('dark', dark);
+      } catch { /* localStorage unavailable, e.g. private mode */ }
+    })();
+  </script>
+  <style>
+    /* The static fallback in #root exists for crawlers and no-JS clients
+       (see comment below); it's not meant to be seen by JS-capable browsers,
+       so hide it by default to avoid a flash of unstyled copy before React
+       mounts. Crawlers still read the markup regardless of display; real
+       no-JS clients get it back via the <noscript> override below. */
+    #root main { display: none; }
+  </style>
+  <noscript>
+    <style>#root main { display: block; }</style>
+  </noscript>
   <script defer src="https://analytics.presio.xyz/script.js" data-website-id="3b9c85c6-1dae-4a30-9508-200f274cb857"></script>
   <script defer src="https://analytics.presio.xyz/recorder.js" data-website-id="3b9c85c6-1dae-4a30-9508-200f274cb857" data-sample-rate="0.1" data-mask-level="moderate" data-max-duration="300000"></script>
 </head>

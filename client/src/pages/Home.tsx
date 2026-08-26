@@ -1,27 +1,285 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { getDocument } from "pdfjs-dist";
+import { ExternalLink, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { DialogOverlay } from "@/components/ui/dialog-overlay";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AccountControl } from "@/components/AccountControl";
 import { PresioLogo } from "@/components/PresioLogo";
 import { MobileNotice } from "@/components/MobileNotice";
-import { idbPut, idbList, idbDelete, idbPruneOlderThan } from "@/lib/localStore";
-import { lsRemove, sessionKey } from "@/lib/storage";
+import { CodeBlock } from "@/components/CodeBlock";
+import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
+import { idbPut, idbList } from "@/lib/localStore";
 import { getSessionAuth, setSessionAuth } from "@/lib/utils";
+import { lsRemove, annotationsKey } from "@/lib/storage";
+import { track, sha256Hex } from "@/lib/analytics";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
 import { supabase } from "@/lib/supabaseClient";
 import "@/lib/pdf"; // ensure pdf.js worker is configured
 
-const LOCAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const TYPST_PACKAGE_URL = "https://github.com/benedict-armstrong/presio-typst-package";
+const LATEX_PACKAGE_URL = "https://github.com/benedict-armstrong/presio-latex-package";
+const OVERLEAF_EXAMPLE_URL =
+  "https://www.overleaf.com/docs?snip_uri[]=https://raw.githubusercontent.com/benedict-armstrong/presio-latex-package/main/starter/main.tex&snip_uri[]=https://raw.githubusercontent.com/benedict-armstrong/presio-latex-package/main/presio.sty&snip_uri[]=https://raw.githubusercontent.com/benedict-armstrong/presio-latex-package/main/starter/clip.gif&snip_uri[]=https://raw.githubusercontent.com/benedict-armstrong/presio-latex-package/main/starter/poster.png&snip_name[]=main.tex&snip_name[]=presio.sty&snip_name[]=clip.gif&snip_name[]=poster.png&engine=pdflatex";
 
-interface RecentSession {
+const TYPST_EXAMPLE_PDF_URL =
+  "https://raw.githubusercontent.com/benedict-armstrong/presio-typst-package/main/examples/plain/example.pdf";
+const LATEX_EXAMPLE_PDF_URL =
+  "https://raw.githubusercontent.com/benedict-armstrong/presio-latex-package/main/starter/main.pdf";
+
+const PITCH = [
+  "No account, no install",
+  "Speaker Notes & youtube/vimeo/gifs",
+  "Local by default - PDFs stay on device",
+  "Drawing and Annotations",
+  "Easy Sharing",
+];
+
+function PitchTicker() {
+  return (
+    <div className="mb-4 overflow-hidden">
+      <div className="animate-marquee flex w-max items-center">
+        {[...PITCH, ...PITCH].map((statement, i) => (
+          <span
+            key={i}
+            className="inline-flex shrink-0 items-center gap-2 pr-6 font-mono text-xs font-semibold uppercase tracking-wide text-[var(--home2-accent)]"
+          >
+            {statement}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const CUES = [
+  {
+    label: "Local by default",
+    title: "Nothing leaves your browser.",
+    body: "Your deck is decoded locally and stored in this browser only. It works offline, opens instantly, and there's nothing to upload unless you choose to share it.",
+    gif: "cue-01-local.mp4",
+  },
+  {
+    label: "One code, any screen",
+    title: "Share a code, present everywhere.",
+    body: "Log in to sync a deck online and hand out a 6-character code. Anyone who enters it watches your slides change live — no app, no sign-up.",
+    gif: "cue-02-sync.mp4",
+  },
+  {
+    label: "Notes & media, built in",
+    title: "Speaker notes and video that just play.",
+    body: "Write in Typst or LaTeX, attach notes and media with one line, and Presio reads them automatically. Embedded video and GIFs stay in sync across every viewer.",
+    gif: "cue-03-notes.mp4",
+  },
+  {
+    label: "Built for the podium",
+    title: "A controller that stays out of the way.",
+    body: "A presentation timer, remappable keyboard shortcuts, and a layout you can rearrange — so driving the deck never competes with presenting it.",
+    gif: "cue-04-controller.mp4",
+  },
+];
+
+
+function PlayGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4 translate-x-[1px]">
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  );
+}
+
+// Official Typst logo (Simple Icons, CC0).
+function TypstMark() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="#239DAD"
+      className="h-5 w-5 shrink-0"
+      role="img"
+      aria-label="Typst"
+    >
+      <path d="M12.654 17.846c0 1.114.16 1.861.479 2.242.32.381.901.572 1.743.572.872 0 1.99-.44 3.356-1.319l.871 1.45C16.547 22.931 14.44 24 12.785 24c-1.656 0-2.964-.395-3.922-1.187-.959-.82-1.438-2.256-1.438-4.307V6.989H5.246l-.349-1.626 2.528-.791V2.418L12.654 0v4.835l5.142-.395-.48 2.857-4.662-.176v10.725Z" />
+    </svg>
+  );
+}
+
+// Official LaTeX wordmark (Wikimedia Commons, public domain).
+function LatexMark() {
+  return (
+    <svg
+      viewBox="0 0 1200 500"
+      fill="#103bc9"
+      className="h-4 w-auto shrink-0"
+      role="img"
+      aria-label="LaTeX"
+    >
+      <path d="m5.46 4.23h-.25c-.1 1.02-.24 2.26-2 2.26h-.81c-.47 0-.49-.07-.49-.4v-5.31c0-.34 0-.48.94-.48h.33v-.3c-.36.03-1.26.03-1.67.03-.39 0-1.17 0-1.51-.03v.3h.23c.77 0 .79.11.79.47v5.25c0 .36-.02.47-.79.47h-.23v.31h5.19z" transform="matrix(45 0 0 45 40 47.65)" />
+      <path d="m2.81.16c-.04-.12-.06-.16-.19-.16s-.16.04-.2.16l-1.61 4.08c-.07.17-.19.48-.81.48v.25h1.55v-.25c-.31 0-.5-.14-.5-.34 0-.05.01-.07.03-.14 0 0 .34-.86.34-.86h1.98l.4 1.02c.02.04.04.09.04.12 0 .2-.38.2-.57.2v.25h1.97v-.25h-.14c-.47 0-.52-.07-.59-.27 0 0-1.7-4.29-1.7-4.29zm-.4.71.89 2.26h-1.78z" transform="matrix(45 0 0 45 151.6 40)" />
+      <path d="m6.27 0h-6.09s-.18 2.24-.18 2.24h.24c.14-1.61.29-1.94 1.8-1.94.18 0 .44 0 .54.02.21.04.21.15.21.38v5.25c0 .34 0 .48-1.05.48h-.4v.31c.41-.03 1.42-.03 1.88-.03s1.49 0 1.9.03v-.31h-.4c-1.05 0-1.05-.14-1.05-.48v-5.25c0-.2 0-.34.18-.38.11-.02.38-.02.57-.02 1.5 0 1.65.33 1.79 1.94h.25s-.19-2.24-.19-2.24z" transform="matrix(45 0 0 45 356.35 50.35)" />
+      <path d="m6.16 4.2h-.25c-.25 1.53-.48 2.26-2.19 2.26h-1.32c-.47 0-.49-.07-.49-.4v-2.66h.89c.97 0 1.08.32 1.08 1.17h.25v-2.64h-.25c0 .85-.11 1.16-1.08 1.16h-.89v-2.39c0-.33.02-.4.49-.4h1.28c1.53 0 1.79.55 1.95 1.94h.25l-.28-2.24h-5.6v.3h.23c.77 0 .79.11.79.47v5.22c0 .36-.02.47-.79.47h-.23v.31h5.74z" transform="matrix(45 0 0 45 602.5 150.25)" />
+      <path d="m3.76 2.95 1.37-2c.21-.32.55-.64 1.44-.65v-.3h-2.38v.3c.4.01.62.23.62.46 0 .1-.02.12-.09.23 0 0-1.14 1.68-1.14 1.68l-1.28-1.92c-.02-.03-.07-.11-.07-.15 0-.12.22-.29.64-.3v-.3c-.34.03-1.07.03-1.45.03-.31 0-.93-.01-1.3-.03v.3h.19c.55 0 .74.07.93.35 0 0 1.83 2.77 1.83 2.77l-1.63 2.41c-.14.2-.44.66-1.44.66v.31h2.38v-.31c-.46-.01-.63-.28-.63-.46 0-.09.03-.13.1-.24l1.41-2.09 1.58 2.38c.02.04.05.08.05.11 0 .12-.22.29-.65.3v.31c.35-.03 1.08-.03 1.45-.03.42 0 .88.01 1.3.03v-.31h-.19c-.52 0-.73-.05-.94-.36 0 0-2.1-3.18-2.1-3.18z" transform="matrix(45 0 0 45 845.95 47.65)" />
+    </svg>
+  );
+}
+
+function CueMedia({ gif }: { gif: string }) {
+  return (
+    <div
+      className="group relative aspect-video overflow-hidden rounded-2xl border shadow-sm"
+      style={{
+        backgroundImage:
+          "repeating-linear-gradient(45deg, var(--home2-grid) 0 1px, transparent 1px 14px)",
+        backgroundColor: "var(--card)",
+      }}
+    >
+      <div className="absolute inset-0 flex items-center justify-center">
+        <div className="flex h-11 w-11 items-center justify-center rounded-full border bg-card text-muted-foreground transition-colors group-hover:text-[var(--home2-accent)] group-hover:border-[var(--home2-accent)]">
+          <PlayGlyph />
+        </div>
+      </div>
+      <span className="absolute bottom-3 left-3 rounded-md border bg-background px-2 py-0.5 font-mono text-[10.5px] text-muted-foreground">
+        {gif}
+      </span>
+    </div>
+  );
+}
+
+// Shared scroll-reveal: dims + drops an element until it enters the
+// viewport, then brightens it as the page scrolls further (used for every
+// section below the mock browser mock-up).
+function useScrollReveal() {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const reducedMotion =
+    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const [inView, setInView] = useState(() => reducedMotion);
+  const [scrollY, setScrollY] = useState(() =>
+    reducedMotion ? 0 : typeof window !== "undefined" ? window.scrollY : 0
+  );
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || inView) return;
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setInView(true);
+          io.disconnect();
+        }
+      },
+      { threshold: 0.2 }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [inView]);
+
+  useEffect(() => {
+    const onScroll = () => setScrollY(window.scrollY);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  const RAMP_PX = 500;
+  const progress = inView ? (reducedMotion ? 1 : Math.min(1, scrollY / RAMP_PX)) : 0;
+  const opacity = 0.4 + progress * 0.6;
+
+  return { ref, inView, opacity };
+}
+
+function ScrollReveal({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  const { ref, inView, opacity } = useScrollReveal();
+  return (
+    <div
+      ref={ref}
+      className={`transition-all duration-700 ease-out ${inView ? "translate-y-0" : "translate-y-7"} ${className}`}
+      style={{ opacity }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Cue({ cue, index, flip }: { cue: (typeof CUES)[number]; index: number; flip: boolean }) {  return (
+    <ScrollReveal className="grid grid-cols-1 items-center gap-7 md:grid-cols-2 md:gap-16">
+      <div className={flip ? "md:order-2" : "md:order-1"}>
+        <div className="mb-3.5 flex items-center gap-2.5 font-mono text-xs font-semibold uppercase tracking-wide text-[var(--home2-accent)]">
+          <span className="text-muted-foreground">CUE {String(index + 1).padStart(2, "0")}</span>
+          {cue.label}
+        </div>
+        <h3 className="mb-3 text-xl font-semibold leading-tight tracking-tight md:text-2xl">
+          {cue.title}
+        </h3>
+        <p className="max-w-[42ch] text-[15px] text-muted-foreground">{cue.body}</p>
+      </div>
+      <div className={flip ? "md:order-1" : "md:order-2"}>
+        <CueMedia gif={cue.gif} />
+      </div>
+    </ScrollReveal>
+  );
+}
+
+// Compact date for the recents list: "Aug 25" this year, otherwise "Aug 25, 2025".
+function formatRecentDate(ts: number): string {
+  const d = new Date(ts);
+  const opts: Intl.DateTimeFormatOptions =
+    d.getFullYear() === new Date().getFullYear()
+      ? { month: "short", day: "numeric" }
+      : { month: "short", day: "numeric", year: "numeric" };
+  return d.toLocaleDateString(undefined, opts);
+}
+
+// One row in the recents list: everything this browser could control. Local
+// decks come from IndexedDB; synced ones are discovered through the controller
+// credentials this browser holds (created+synced here, or taken over via
+// passphrase) — the IndexedDB record is deleted on claim, so without the
+// credential scan a shared deck would vanish from the list.
+interface RecentDeck {
   id: string;
   filename: string;
-  hasToken: boolean;
-  local?: boolean;
+  totalSlides: number;
+  /** Present only for local decks (IndexedDB creation time). */
+  createdAt: number | null;
+  kind: "local" | "synced";
+}
+
+const SESSION_KEY_RE = /^session_([A-Z0-9]{6})$/;
+
+async function listControlledSynced(): Promise<RecentDeck[]> {
+  const ids: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      const m = key.match(SESSION_KEY_RE);
+      if (m && localStorage.getItem(key)?.includes("controllerToken")) ids.push(m[1]);
+    }
+  } catch {
+    return []; // storage unavailable (private mode): nothing to scan
+  }
+  const out: RecentDeck[] = [];
+  // A browser only controls a handful of decks; a small sequential scan keeps
+  // this trivial and ordered by insertion (most recent credential first).
+  for (const id of ids.slice(0, 20)) {
+    try {
+      const res = await fetch(`/api/sessions/${id}`);
+      if (!res.ok) {
+        // Ended or expired server-side: the stored credential is dead weight.
+        lsRemove(`session_${id}`);
+        continue;
+      }
+      const s = await res.json();
+      if (s.local) continue; // local rows are listed from IndexedDB above
+      out.push({
+        id,
+        filename: s.filename,
+        totalSlides: s.total_slides,
+        createdAt: null,
+        kind: "synced",
+      });
+    } catch {
+      // Offline or server unreachable: skip rather than block the page.
+    }
+  }
+  return out;
 }
 
 export default function Home() {
@@ -34,127 +292,240 @@ export default function Home() {
   const [chars, setChars] = useState<string[]>(Array(CODE_LENGTH).fill(""));
   const charRefs = useRef<(HTMLInputElement | null)[]>([]);
   const code = chars.join("");
-  const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
-  const [confirmRemove, setConfirmRemove] = useState<RecentSession | null>(null);
   const [pdfUrl, setPdfUrl] = useState("");
   const [urlBusy, setUrlBusy] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
+  const [exampleBusy, setExampleBusy] = useState<"typst" | "latex" | null>(null);
+  const [exampleError, setExampleError] = useState("");
+
+  // Presentations this browser could control, with an in-place "Replace PDF"
+  // action so a recompiled deck keeps its code instead of minting a new one.
+  const [recents, setRecents] = useState<RecentDeck[]>([]);
+  const replaceInputRef = useRef<HTMLInputElement | null>(null);
+  const [replaceTarget, setReplaceTarget] = useState<RecentDeck | null>(null);
+  const [replaceFile, setReplaceFile] = useState<File | null>(null);
+  const [replacing, setReplacing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-
     (async () => {
-      // Local presentations stored in IndexedDB — drop stale ones first.
-      await idbPruneOlderThan(LOCAL_TTL_MS).catch(() => { /* ignore */ });
-      const localRecents: RecentSession[] = (await idbList().catch(() => []))
-        .map((m) => ({ id: m.id, filename: m.filename, hasToken: true, local: true }));
-
-      // Server-backed presentations tracked via localStorage tokens. A deck can
-      // legitimately have both an IndexedDB copy and a stored token — a local
-      // session that was handed a controller token at creation (offline mode's
-      // /api/sessions/local) or via a handoff link (Start.tsx) — and the server
-      // row still exists for the code, so it would otherwise be listed twice.
-      // The IndexedDB entry is the better one: it knows the deck is local.
-      const localIds = new Set(localRecents.map((r) => r.id));
-      const sessionKeys = Object.keys(localStorage).filter(
-        (k) => k.startsWith("session_") && !localIds.has(k.replace("session_", ""))
-      );
-      const serverRecents = await Promise.all(
-        sessionKeys.map(async (key) => {
-          const id = key.replace("session_", "");
-          try {
-            const res = await fetch(`/api/sessions/${id}`);
-            if (!res.ok) {
-              lsRemove(key);
-              return null;
-            }
-            const session = await res.json();
-            const stored = getSessionAuth(id);
-            return { id, filename: session.filename, hasToken: !!stored.controllerToken } as RecentSession;
-          } catch {
-            return null;
-          }
-        })
-      );
-
-      if (!cancelled) {
-        setRecentSessions([
-          ...localRecents,
-          ...serverRecents.filter((r): r is RecentSession => r !== null),
-        ]);
+      const locals = await idbList()
+        .then((rs) =>
+          rs.map<RecentDeck>((r) => ({
+            id: r.id,
+            filename: r.filename,
+            totalSlides: r.totalSlides,
+            createdAt: r.createdAt,
+            kind: "local",
+          }))
+        )
+        .catch(() => [] as RecentDeck[]);
+      const controlled = await listControlledSynced();
+      if (cancelled) return;
+      // Locals first (they carry a creation date), then synced decks this
+      // browser holds credentials for; dedupe by id, preferring the local copy.
+      const byId = new Map<string, RecentDeck>();
+      for (const deck of [...locals, ...controlled]) {
+        if (!byId.has(deck.id)) byId.set(deck.id, deck);
       }
+      setRecents([...byId.values()]);
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uploading]);
 
-    return () => { cancelled = true; };
+  const pickReplace = useCallback((target: RecentDeck) => {
+    setReplaceFile(null);
+    setReplaceTarget(target);
+    replaceInputRef.current?.click();
   }, []);
 
-  const upload = useCallback(async (file: File) => {
+  const confirmReplace = useCallback(async () => {
+    if (!replaceTarget || !replaceFile || replacing) return;
+    setReplacing(true);
     setError("");
-    setUploading(true);
-    setProgress(0);
     try {
-      // Everyone defaults to local: keep the PDF in the browser, never upload it.
-      // We reserve a session code on the server (marked local) so it is unique.
-      // Logged-in users can opt into syncing later from the share screen.
-      const buf = await file.arrayBuffer();
-      // Store a real in-memory copy, not the File itself: a File from the picker
-      // is a reference to bytes on disk, and IndexedDB persists the reference.
-      // If the file later moves or changes, reading it back mid-upload fails and
-      // the browser aborts the multipart body it had already started sending.
-      // Snapshot before getDocument(), which transfers the buffer to the pdf.js
-      // worker and leaves it detached; new Blob([buf]) copies immediately.
+      const buf = await replaceFile.arrayBuffer();
+      // Snapshot the bytes before getDocument() transfers the buffer to the
+      // pdf.js worker and detaches it (same ordering as upload()).
       const blob = new Blob([buf], { type: "application/pdf" });
-      setProgress(100);
       const doc = await getDocument({ data: new Uint8Array(buf) }).promise;
       const totalSlides = doc.numPages;
       doc.destroy();
-      const filename = file.name.replace(/\.pdf$/i, "");
-      // If the user is logged in, send their token so the server assigns the
-      // presentation to them right away (getSession refreshes a near-expiry one).
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      const { data: sessionData } = await supabase.auth.getSession();
-      if (sessionData.session) headers.Authorization = `Bearer ${sessionData.session.access_token}`;
-      const res = await fetch("/api/sessions/local", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ filename, total_slides: totalSlides }),
-      });
-      if (!res.ok) throw new Error("Failed to create session");
-      const { id, controllerToken, passphrase } = await res.json();
-      // Local/offline mode returns the controller token so this browser can
-      // later authorize sharing the deck over the network (see useClaim). Hosted
-      // mode omits it and control stays tied to the logged-in owner.
-      if (controllerToken) setSessionAuth(id, { controllerToken, passphrase });
-      try {
-        await idbPut({ id, filename, totalSlides, blob, createdAt: Date.now() });
-      } catch {
-        throw new Error("Couldn't store the presentation in this browser. Private/incognito mode isn't supported — please use a normal window.");
+      const filename = replaceFile.name.replace(/\.pdf$/i, "");
+      if (replaceTarget.kind === "local") {
+        try {
+          await idbPut({
+            id: replaceTarget.id,
+            filename,
+            totalSlides,
+            blob,
+            createdAt: replaceTarget.createdAt ?? Date.now(),
+          });
+        } catch {
+          throw new Error(
+            "Couldn't update the presentation in this browser. Private/incognito mode isn't supported — please use a normal window."
+          );
+        }
+      } else {
+        // Synced deck: overwrite its server copy. The controller token this
+        // browser holds authorizes the write; a logged-in owner token is
+        // attached too when present (the server accepts either).
+        const { controllerToken } = getSessionAuth(replaceTarget.id);
+        if (!controllerToken) {
+          throw new Error("This browser isn't the controller for this presentation");
+        }
+        const headers: Record<string, string> = { "x-controller-token": controllerToken };
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData.session) {
+          headers.Authorization = `Bearer ${sessionData.session.access_token}`;
+        }
+        const form = new FormData();
+        form.append("pdf", blob, `${filename}.pdf`);
+        form.append("filename", filename);
+        const res = await fetch(`/api/sessions/${replaceTarget.id}/pdf`, {
+          method: "POST",
+          headers,
+          body: form,
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || "Failed to replace the PDF");
+        }
       }
-      navigate(`/s/${id}/share`);
+      // Drawings are keyed by slide number; a replaced deck invalidates them.
+      lsRemove(annotationsKey(replaceTarget.id));
+      let sha256: string | undefined;
+      try {
+        sha256 = await sha256Hex(buf);
+      } catch {
+        // No crypto.subtle (plain-http origins): track without a fingerprint.
+      }
+      track("deck-replace", {
+        filename,
+        sha256,
+        size: replaceFile.size,
+        slides: totalSlides,
+        mode: replaceTarget.kind === "local" ? "local" : "server",
+      });
+      navigate(`/s/${replaceTarget.id}?role=controller`);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Upload failed");
+      setError(e instanceof Error ? e.message : "Failed to replace the PDF");
     } finally {
-      setUploading(false);
+      setReplacing(false);
     }
-  }, [navigate]);
+  }, [replaceTarget, replaceFile, replacing, navigate]);
 
-  // "Bring your own storage": create a shareable session from an externally
-  // hosted PDF. No upload, no login required — Presio stores only the URL.
-  const submitUrl = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!pdfUrl.trim() || urlBusy) return;
-    setError("");
-    setUrlBusy(true);
-    try {
-      const meta = await loadExternalPdfMeta(pdfUrl);
-      const { data: sessionData } = await supabase.auth.getSession();
-      const id = await createExternalSession(meta, sessionData.session?.access_token);
-      navigate(`/s/${id}/share`);
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to create session");
-    } finally {
-      setUrlBusy(false);
-    }
-  }, [pdfUrl, urlBusy, navigate]);
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 8);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  const upload = useCallback(
+    async (file: File) => {
+      setError("");
+      setUploading(true);
+      setProgress(0);
+      try {
+        const buf = await file.arrayBuffer();
+        // Store an in-memory copy rather than the File itself. A File from the
+        // picker is only a reference to the file on disk, and IndexedDB
+        // persists that reference — not the bytes. If the file is moved,
+        // edited, or removed before the deck is synced (the login round-trip
+        // alone is enough on some browsers), reading it back fails partway
+        // through the upload and the server sees a truncated multipart body.
+        // Snapshot before getDocument(), which transfers the buffer to the
+        // pdf.js worker and leaves it detached.
+        const blob = new Blob([buf], { type: "application/pdf" });
+        // Fingerprint the bytes while they're still readable — getDocument()
+        // below transfers the buffer to the pdf.js worker and detaches it.
+        // Hashing reads memory already in hand, so it adds no file I/O, and
+        // only the digest ever leaves the browser.
+        let sha256: string | undefined;
+        try {
+          sha256 = await sha256Hex(buf);
+        } catch {
+          // No crypto.subtle (e.g. plain-http origins): report the upload
+          // without a fingerprint rather than blocking it.
+        }
+        setProgress(100);
+        const doc = await getDocument({ data: new Uint8Array(buf) }).promise;
+        const totalSlides = doc.numPages;
+        doc.destroy();
+        const filename = file.name.replace(/\.pdf$/i, "");
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        const { data: sessionData } = await supabase.auth.getSession();
+        if (sessionData.session) headers.Authorization = `Bearer ${sessionData.session.access_token}`;
+        const res = await fetch("/api/sessions/local", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ filename, total_slides: totalSlides }),
+        });
+        if (!res.ok) throw new Error("Failed to create session");
+        const { id, controllerToken, passphrase } = await res.json();
+        if (controllerToken) setSessionAuth(id, { controllerToken, passphrase });
+        try {
+          await idbPut({ id, filename, totalSlides, blob, createdAt: Date.now() });
+        } catch {
+          throw new Error(
+            "Couldn't store the presentation in this browser. Private/incognito mode isn't supported — please use a normal window."
+          );
+        }
+        // Counted only once the deck is durably stored; the analytics sink
+        // timestamps each event, so two uploads of the same filename can be
+        // compared by hash to spot recompiled vs. re-uploaded decks.
+        track("upload", { filename, sha256, size: file.size, slides: totalSlides });
+        navigate(`/s/${id}/share`);
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : "Upload failed");
+      } finally {
+        setUploading(false);
+      }
+    },
+    [navigate]
+  );
+
+  const submitUrl = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!pdfUrl.trim() || urlBusy) return;
+      setError("");
+      setUrlBusy(true);
+      try {
+        const meta = await loadExternalPdfMeta(pdfUrl);
+        const { data: sessionData } = await supabase.auth.getSession();
+        const id = await createExternalSession(meta, sessionData.session?.access_token);
+        navigate(`/s/${id}/share`);
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : "Failed to create session");
+      } finally {
+        setUrlBusy(false);
+      }
+    },
+    [pdfUrl, urlBusy, navigate]
+  );
+
+  const openExample = useCallback(
+    async (kind: "typst" | "latex") => {
+      if (exampleBusy) return;
+      setExampleError("");
+      setExampleBusy(kind);
+      try {
+        const url = kind === "typst" ? TYPST_EXAMPLE_PDF_URL : LATEX_EXAMPLE_PDF_URL;
+        const meta = await loadExternalPdfMeta(url);
+        const { data: sessionData } = await supabase.auth.getSession();
+        const id = await createExternalSession(meta, sessionData.session?.access_token);
+        navigate(`/s/${id}/share`);
+      } catch (e: unknown) {
+        setExampleError(e instanceof Error ? e.message : "Failed to open example");
+      } finally {
+        setExampleBusy(null);
+      }
+    },
+    [exampleBusy, navigate]
+  );
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
@@ -186,241 +557,455 @@ export default function Home() {
     [upload]
   );
 
-  const joinSession = (role: string) => {
-    if (code.length < CODE_LENGTH) return;
-    navigate(`/s/${code}?role=${role}`);
-  };
-
-  // Once a full code is entered (typed or pasted), join the session as a viewer.
   useEffect(() => {
     if (code.length === CODE_LENGTH) navigate(`/s/${code}?role=viewer`);
   }, [code, navigate]);
 
-  const removeRecent = async (s: RecentSession) => {
-    if (s.local) await idbDelete(s.id).catch(() => { /* ignore */ });
-    else lsRemove(sessionKey(s.id));
-    setRecentSessions((prev) => prev.filter((r) => r.id !== s.id));
-  };
-
-  const handleRemove = (s: RecentSession) => {
-    // Local presentations live only in this browser, so removing them is
-    // permanent — confirm first. Server-backed ones just drop the local token.
-    if (s.local) setConfirmRemove(s);
-    else removeRecent(s);
-  };
-
   return (
     <div
-      className="min-h-screen flex flex-col items-center justify-center p-4 gap-4"
+      className="home2 min-h-screen bg-background text-foreground"
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
-      <Card className="w-full max-w-lg">
-        <CardContent className="pt-6 space-y-6">
-          <div className="text-center space-y-2">
-            <div className="flex items-center justify-center gap-2">
-              <PresioLogo className="h-6 w-auto text-foreground" />
-              <h1 className="text-2xl font-semibold tracking-tight">Presio</h1>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              Upload a PDF presentation to start presenting
-            </p>
-          </div>
-
-          <div
-            className={`border-2 border-dashed rounded-lg p-12 text-center transition-colors cursor-pointer ${dragging
-              ? "border-primary bg-primary/5"
-              : "border-muted-foreground/25 hover:border-muted-foreground/50"
-              }`}
-            onClick={() => document.getElementById("file-input")?.click()}
+      {/* env(safe-area-inset-top) is 0 in browser tabs; in the installed app
+          it drops the nav below the status bar. */}
+      <nav
+        className={`sticky top-0 z-40 flex items-center justify-between px-6 pt-[calc(env(safe-area-inset-top)+1rem)] pb-4 backdrop-blur transition-colors ${scrolled ? "border-b bg-background/90" : "border-b border-transparent bg-background/70"
+          }`}
+      >
+        <div className="flex items-center gap-2">
+          <PresioLogo className="h-5 w-auto text-foreground" />
+          <span className="font-mono text-base font-semibold tracking-tight">Presio</span>
+        </div>
+        <div className="flex items-center gap-5">
+          <Link
+            to="/about"
+            className="hidden text-sm text-muted-foreground transition-colors hover:text-foreground sm:inline"
           >
-            {uploading ? (
-              <div className="space-y-2 w-full max-w-xs mx-auto">
-                <p className="text-muted-foreground text-sm">
-                  {progress < 100 ? `Uploading… ${progress}%` : "Processing…"}
-                </p>
-                <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-primary transition-[width] duration-200"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
+            About
+          </Link>
+          <AccountControl />
+          <ThemeToggle />
+        </div>
+      </nav>
+
+      {/* ---------------------------------------------------------------- hero */}
+      <section className="relative px-6 pb-24 pt-16">
+        <div className="mx-auto grid max-w-6xl grid-cols-1 items-center gap-12 md:grid-cols-[0.92fr_1.08fr] md:gap-20">
+          <div>
+            <div className='max-w-xl'>
+              <h1 className="mb-8 font-mono text-4xl font-semibold leading-[1.06] tracking-tight md:text-5xl">
+                Better PDF presentations.
+                {/* Turn a PDF into a{" "}
+              <span className="text-[var(--home2-accent)]">live</span> presentation. */}
+              </h1>
+              {/* <p className="mb-8 max-w-[46ch] text-base text-muted-foreground md:text-[17px]">
+              Drop a deck and get a controller with notes and a viewer that mirrors it in real
+              time — on this laptop, or on every screen in the room.
+            </p> */}
+              <div className='mb-8'>
+                <PitchTicker />
               </div>
-            ) : (
-              <p className="text-muted-foreground text-sm">Drop a PDF here or click to browse</p>
-            )}
-            <input
-              id="file-input"
-              type="file"
-              accept=".pdf"
-              className="hidden"
-              onChange={onFileSelect}
-            />
-          </div>
-
-          <form onSubmit={submitUrl} className="flex gap-2">
-            <input
-              type="url"
-              inputMode="url"
-              placeholder="…or paste a URL to a PDF"
-              value={pdfUrl}
-              onChange={(e) => setPdfUrl(e.target.value)}
-              className="flex-1 min-w-0 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            />
-            {pdfUrl.trim() && (
-              <Button type="submit" variant="outline" disabled={urlBusy}>
-                {urlBusy ? "Loading…" : "Go"}
-              </Button>
-            )}
-          </form>
-
-          {error && (
-            <p className="text-sm text-destructive text-center">{error}</p>
-          )}
-
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <span className="w-full border-t" />
             </div>
-            <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-card px-2 text-muted-foreground">or join existing</span>
-            </div>
-          </div>
 
-          <div className="space-y-3">
-            <div className="flex gap-2 justify-center">
-              {Array.from({ length: CODE_LENGTH }, (_, i) => (
+            <div className="py-6">
+              <div
+                className={`cursor-pointer rounded-xl border-2 border-dashed px-9 py-14 text-center transition-colors ${dragging
+                  ? "border-(--home2-accent) bg-(--home2-accent-soft)"
+                  : "border-muted-foreground/25 hover:border-muted-foreground/50"
+                  }`}
+                onClick={() => document.getElementById("home2-file-input")?.click()}
+              >
+                {uploading ? (
+                  <div className="mx-auto w-full max-w-xs space-y-2">
+                    <p className="text-sm text-muted-foreground">
+                      {progress < 100 ? `Uploading… ${progress}%` : "Processing…"}
+                    </p>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-(--home2-accent) transition-[width] duration-200"
+                        style={{ width: `${progress}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      className="mx-auto mb-3 h-8 w-8 text-muted-foreground/70"
+                    >
+                      <path d="M12 15V4M12 4l-4 4M12 4l4 4" />
+                      <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+                    </svg>
+                    <p className="text-sm text-muted-foreground">Drop a PDF here or click to browse</p>
+                    <p className="mt-1 text-xs text-muted-foreground/70">stays in this browser by default</p>
+                  </>
+                )}
                 <input
-                  key={i}
-                  ref={(el) => { charRefs.current[i] = el; }}
-                  type="text"
-                  inputMode="text"
-                  maxLength={1}
-                  value={chars[i]}
-                  className="w-10 h-12 rounded-md border border-input bg-background text-center text-lg font-mono font-bold uppercase tracking-widest focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring transition-colors"
-                  onChange={(e) => {
-                    const val = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
-                    if (!val) return;
-                    const next = [...chars];
-                    next[i] = val[val.length - 1];
-                    setChars(next);
-                    if (i < CODE_LENGTH - 1) charRefs.current[i + 1]?.focus();
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Backspace") {
-                      e.preventDefault();
-                      const next = [...chars];
-                      if (chars[i]) {
-                        next[i] = "";
-                        setChars(next);
-                      } else if (i > 0) {
-                        next[i - 1] = "";
-                        setChars(next);
-                        charRefs.current[i - 1]?.focus();
-                      }
-                    } else if (e.key === "ArrowLeft" && i > 0) {
-                      charRefs.current[i - 1]?.focus();
-                    } else if (e.key === "ArrowRight" && i < CODE_LENGTH - 1) {
-                      charRefs.current[i + 1]?.focus();
-                    } else if (e.key === "Enter" && code.length === CODE_LENGTH) {
-                      joinSession("viewer");
-                    }
-                  }}
-                  onPaste={(e) => {
-                    e.preventDefault();
-                    const pasted = e.clipboardData.getData("text").toUpperCase().replace(/[^A-Z0-9]/g, "");
-                    const next = [...chars];
-                    for (let j = 0; j < CODE_LENGTH - i && j < pasted.length; j++) {
-                      next[i + j] = pasted[j];
-                    }
-                    setChars(next);
-                    const focusIdx = Math.min(i + pasted.length, CODE_LENGTH - 1);
-                    charRefs.current[focusIdx]?.focus();
-                  }}
-                  onFocus={(e) => e.target.select()}
+                  id="home2-file-input"
+                  type="file"
+                  accept=".pdf"
+                  className="hidden"
+                  onChange={onFileSelect}
                 />
-              ))}
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+              </div>
 
-      {recentSessions.length > 0 && (
-        <Card className="w-full max-w-lg">
-          <CardContent className="pt-6 space-y-3">
-            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              Recent presentations
-            </p>
-            {recentSessions.map((s) => (
-              <div key={s.id} className="flex items-center gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">
-                    {s.filename}
-                    {s.local && (
-                      <span className="ml-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground border rounded px-1 py-0.5">
-                        Local
-                      </span>
-                    )}
-                  </p>
-                  <p className="text-xs text-muted-foreground font-mono">{s.id}</p>
+              <form onSubmit={submitUrl} className="mt-3.5 flex gap-2">
+                <input
+                  type="url"
+                  inputMode="url"
+                  placeholder="…or paste a URL to a PDF"
+                  value={pdfUrl}
+                  onChange={(e) => setPdfUrl(e.target.value)}
+                  className="min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--home2-accent)]"
+                />
+                {pdfUrl.trim() && (
+                  <Button type="submit" variant="outline" disabled={urlBusy}>
+                    {urlBusy ? "Loading…" : "Go"}
+                  </Button>
+                )}
+              </form>
+
+              {error && <p className="mt-3 text-center text-sm text-destructive">{error}</p>}
+
+              <div className="relative my-4">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t" />
                 </div>
-                <div className="flex gap-1.5 shrink-0">
-                  {s.hasToken && (
-                    <Button size="sm" variant="outline" onClick={() => navigate(`/s/${s.id}?role=controller`)}>
-                      Control
-                    </Button>
-                  )}
-                  <Button size="sm" variant="outline" onClick={() => navigate(`/s/${s.id}?role=viewer`)}>
-                    View
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => handleRemove(s)} title="Remove">
-                    ✕
-                  </Button>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-card px-2 text-muted-foreground">or join existing</span>
                 </div>
               </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
 
-      <div className="flex items-center gap-3">
-        <Link
-          to="/about"
-          className="text-xs text-muted-foreground hover:text-foreground transition-colors underline underline-offset-4"
-        >
-          How does Presio work?
-        </Link>
-        <AccountControl />
-        <ThemeToggle />
-      </div>
+              <div className="flex justify-center gap-2">
+                {Array.from({ length: CODE_LENGTH }, (_, i) => (
+                  <input
+                    key={i}
+                    ref={(el) => {
+                      charRefs.current[i] = el;
+                    }}
+                    type="text"
+                    inputMode="text"
+                    maxLength={1}
+                    value={chars[i]}
+                    className="h-12 w-10 rounded-md border border-input bg-background text-center font-mono text-lg font-bold uppercase tracking-widest transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--home2-accent)]"
+                    onChange={(e) => {
+                      const val = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+                      if (!val) return;
+                      const next = [...chars];
+                      next[i] = val[val.length - 1];
+                      setChars(next);
+                      if (i < CODE_LENGTH - 1) charRefs.current[i + 1]?.focus();
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Backspace") {
+                        e.preventDefault();
+                        const next = [...chars];
+                        if (chars[i]) {
+                          next[i] = "";
+                          setChars(next);
+                        } else if (i > 0) {
+                          next[i - 1] = "";
+                          setChars(next);
+                          charRefs.current[i - 1]?.focus();
+                        }
+                      } else if (e.key === "ArrowLeft" && i > 0) {
+                        charRefs.current[i - 1]?.focus();
+                      } else if (e.key === "ArrowRight" && i < CODE_LENGTH - 1) {
+                        charRefs.current[i + 1]?.focus();
+                      } else if (e.key === "Enter" && code.length === CODE_LENGTH) {
+                        navigate(`/s/${code}?role=viewer`);
+                      }
+                    }}
+                    onPaste={(e) => {
+                      e.preventDefault();
+                      const pasted = e.clipboardData.getData("text").toUpperCase().replace(/[^A-Z0-9]/g, "");
+                      const next = [...chars];
+                      for (let j = 0; j < CODE_LENGTH - i && j < pasted.length; j++) {
+                        next[i + j] = pasted[j];
+                      }
+                      setChars(next);
+                      const focusIdx = Math.min(i + pasted.length, CODE_LENGTH - 1);
+                      charRefs.current[focusIdx]?.focus();
+                    }}
+                    onFocus={(e) => e.target.select()}
+                  />
+                ))}
+              </div>
 
-      {confirmRemove && (
-        <DialogOverlay onClose={() => setConfirmRemove(null)}>
-          <div className="space-y-2 text-center">
-            <h2 className="text-lg font-semibold">Delete presentation?</h2>
-            <p className="text-sm text-muted-foreground">
-              This presentation is stored only in this browser and will be
-              permanently deleted. This action cannot be undone.
+              {recents.length > 0 && (
+                <div className="mt-8">
+                  <div className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                    Recent presentations
+                  </div>
+                  <ul className="space-y-1.5">
+                    {recents.map((r) => (
+                      <li
+                        key={r.id}
+                        className="flex items-center gap-2 rounded-md border px-3 py-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{r.filename}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {r.totalSlides} {r.totalSlides === 1 ? "slide" : "slides"}
+                            {" · "}
+                            <span
+                              className={r.kind === "synced" ? "text-(--home2-accent)" : undefined}
+                            >
+                              {r.kind === "synced" ? "shared" : "local"}
+                            </span>
+                            {r.createdAt !== null && ` · ${formatRecentDate(r.createdAt)}`}
+                          </p>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => navigate(`/s/${r.id}?role=controller`)}
+                        >
+                          Open
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title="Swap in a recompiled PDF — keeps this presentation's code"
+                          disabled={replacing}
+                          onClick={() => pickReplace(r)}
+                        >
+                          <RefreshCw size={14} />
+                          Replace
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* mock browser + phone visual, purely illustrative */}
+          <div className="relative mx-auto aspect-[4/3.1] w-full max-w-115 md:mx-0 md:max-w-none" aria-hidden="true">
+            <div className="absolute inset-0 mr-[8%] mb-[10%] flex flex-col overflow-hidden rounded-xl border bg-card shadow-lg">
+              <div className="flex items-center gap-1.5 border-b bg-muted/50 px-3 py-2.5">
+                <div className="flex gap-1.5">
+                  <span className="h-2 w-2 rounded-full bg-border" />
+                  <span className="h-2 w-2 rounded-full bg-border" />
+                  <span className="h-2 w-2 rounded-full bg-border" />
+                </div>
+                <div className="flex-1 rounded bg-background px-2 py-0.5 text-center font-mono text-[10.5px] text-muted-foreground">
+                  presio.xyz/s/A3F9K2
+                </div>
+              </div>
+              <div className="grid flex-1 grid-cols-[64px_1fr_1fr] gap-px bg-border">
+                <div className="flex flex-col gap-1.5 bg-card p-1.5">
+                  <div className="aspect-[4/3] rounded border bg-[var(--home2-accent-soft)] ring-1 ring-[var(--home2-accent)]" />
+                  <div className="aspect-[4/3] rounded border bg-muted" />
+                  <div className="aspect-[4/3] rounded border bg-muted" />
+                  <div className="aspect-[4/3] rounded border bg-muted" />
+                </div>
+                <div className="flex items-center justify-center bg-card p-3.5">
+                  <div className="relative aspect-[16/10] w-full overflow-hidden rounded-md border bg-gradient-to-br from-muted to-background">
+                    <div className="absolute left-[14%] right-[30%] top-[22%] h-1.5 rounded bg-border" />
+                    <div className="absolute right-[45%] left-[14%] top-[34%] h-1.5 rounded bg-border" />
+                  </div>
+                </div>
+                <div className="bg-card p-3">
+                  <div className="mb-2 font-mono text-[9.5px] uppercase tracking-wide text-muted-foreground/70">
+                    Speaker notes
+                  </div>
+                  <div className="mb-1.5 h-1.5 rounded bg-muted" />
+                  <div className="mb-1.5 h-1.5 w-[90%] rounded bg-muted" />
+                  <div className="mb-1.5 h-1.5 w-[70%] rounded bg-muted" />
+                  <div className="h-1.5 w-[80%] rounded bg-muted" />
+                </div>
+              </div>
+            </div>
+            <div className="absolute -right-[2%] -bottom-[6%] hidden w-[34%] rounded-[22px] bg-foreground p-2 shadow-lg sm:block">
+              <div className="flex h-full flex-col overflow-hidden rounded-[15px] bg-card">
+                <div className="flex items-center justify-between px-2 pt-2 pb-1">
+                  <span className="flex items-center gap-1 font-mono text-[8px] font-bold uppercase tracking-wide text-[var(--home2-accent)]">
+                    <span className="relative flex h-1.5 w-1.5">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--home2-accent)] opacity-60" />
+                      <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[var(--home2-accent)]" />
+                    </span>
+                    Live
+                  </span>
+                </div>
+                <div className="relative m-2 flex-1 rounded border bg-gradient-to-br from-muted to-background">
+                  <div className="absolute left-[14%] right-[30%] top-[22%] h-1 rounded bg-border" />
+                  <div className="absolute right-[45%] left-[14%] top-[32%] h-1 rounded bg-border" />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ---------------------------------------------------------- integrations */}
+      <section id="integrations" className="px-6 py-24 md:py-28">
+        <ScrollReveal className="mx-auto max-w-6xl">
+          <div className="mb-12 max-w-2xl">
+            <div className="mb-3.5 font-mono text-xs font-semibold uppercase tracking-wide text-(--home2-accent)">
+              Typst &amp; LaTeX packages
+            </div>
+            <h2 className="mb-3 text-xl font-semibold leading-tight tracking-tight md:text-2xl">
+              Write speaker notes and media straight into your source.
+            </h2>
+            <p className="max-w-[52ch] text-[15px] text-muted-foreground">
+              Presio ships companion packages for both Typst and LaTeX. They attach speaker
+              notes and embedded media (GIFs, MP4s, YouTube/Vimeo) to your PDF in a format Presio
+              reads automatically — no manual annotation wiring needed.
             </p>
           </div>
-          <div className="flex gap-2">
-            <Button className="flex-1" variant="outline" onClick={() => setConfirmRemove(null)}>
-              Cancel
-            </Button>
-            <Button
-              className="flex-1"
-              variant="destructive"
-              onClick={() => {
-                removeRecent(confirmRemove);
-                setConfirmRemove(null);
-              }}
-            >
-              Delete
-            </Button>
+
+          <div className="grid grid-cols-1 gap-10 md:grid-cols-2 md:gap-8">
+            <div className="flex flex-col rounded-2xl p-6">
+              <div className="mb-5 flex items-center justify-between gap-3">
+                <h2 className="flex items-center gap-2 font-mono text-lg font-bold text-(--home2-accent)">
+                  <TypstMark />
+                  Typst
+                </h2>
+                <a
+                  href={TYPST_PACKAGE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-muted-foreground underline underline-offset-4 transition-colors hover:text-foreground"
+                >
+                  presio-typst-package <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
+              <p className="mb-4 text-sm text-muted-foreground">
+                Import it at the top of your document, then call{" "}
+                <code className="rounded bg-muted px-1 text-xs">speaker-notes</code> and{" "}
+                <code className="rounded bg-muted px-1 text-xs">media</code> anywhere in your
+                slides. Works with plain Typst, Polylux, or Touying.
+              </p>
+              <CodeBlock
+                code={`#import "@preview/presio:0.2.2": media, speaker-notes
+
+= Introduction
+
+Hello world.
+
+#speaker-notes[
+  Remember to mention the funding agency before the next slide.
+]
+
+#media(path("figures/demo.gif"), width: 60%)`}
+              />
+              <div className="mt-auto flex pt-4">
+                <Button variant="outline" disabled={exampleBusy !== null} onClick={() => openExample("typst")}>
+                  {exampleBusy === "typst" ? "Opening…" : "Try in Presio"}
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex flex-col rounded-2xl p-6">
+              <div className="mb-5 flex items-center justify-between gap-3">
+                <h2 className="flex items-center gap-2 font-mono text-lg font-bold text-(--home2-accent)">
+                  <LatexMark />
+                  LaTeX
+                </h2>
+                <a
+                  href={LATEX_PACKAGE_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-muted-foreground underline underline-offset-4 transition-colors hover:text-foreground"
+                >
+                  presio-latex-package <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
+              <p className="mb-4 text-sm text-muted-foreground">
+                Drop <code className="rounded bg-muted px-1 text-xs">presio.sty</code> next to
+                your <code className="rounded bg-muted px-1 text-xs">.tex</code> file and load it
+                with <code className="rounded bg-muted px-1 text-xs">\usepackage</code>. Works
+                with beamer, powerdot, or plain one-slide-per-page documents.
+              </p>
+              <CodeBlock
+                lang="latex"
+                code={`\\documentclass{beamer}
+\\usepackage{presio}
+
+\\begin{document}
+
+\\begin{frame}{Introduction}
+  Hello world.
+  \\presionote{Remember to mention the demo before moving on.}
+\\end{frame}
+
+\\begin{frame}{The demo}
+  \\presiomedia[width=0.7\\linewidth]{https://www.youtube.com/watch?v=dQw4w9WgXcQ}
+\\end{frame}
+
+\\end{document}`}
+              />
+              <div className="mt-auto flex flex-wrap gap-2 pt-4">
+                <Button variant="outline" asChild>
+                  <a href={OVERLEAF_EXAMPLE_URL} target="_blank" rel="noopener noreferrer">
+                    Open example in Overleaf
+                  </a>
+                </Button>
+                <Button variant="outline" disabled={exampleBusy !== null} onClick={() => openExample("latex")}>
+                  {exampleBusy === "latex" ? "Opening…" : "Try in Presio"}
+                </Button>
+              </div>
+            </div>
           </div>
-        </DialogOverlay>
+
+          {exampleError && <p className="mt-4 text-sm text-destructive">{exampleError}</p>}
+        </ScrollReveal>
+      </section>
+
+
+      {/* ---------------------------------------------------------------- cues */}
+      <section id="cues" className="px-6 py-24 md:py-28">
+        <div className="mx-auto flex max-w-6xl flex-col gap-28 md:gap-32">
+          {CUES.map((cue, i) => (
+            <Cue key={cue.label} cue={cue} index={i} flip={i % 2 === 1} />
+          ))}
+        </div>
+      </section>
+
+      <footer className="px-6 py-8">
+        <ScrollReveal className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 text-xs text-muted-foreground sm:flex-row">
+          <span>© Presio — built for presenting PDFs</span>
+          <div className="flex gap-4">
+            <Link to="/about" className="hover:text-foreground">
+              About
+            </Link>
+            <Link to="/check" className="hover:text-foreground">
+              presio.xyz/check
+            </Link>
+          </div>
+        </ScrollReveal>
+      </footer>
+
+      {replaceTarget && replaceFile && (
+        <ConfirmReplaceDialog
+          onConfirm={confirmReplace}
+          onClose={() => { setReplaceTarget(null); setReplaceFile(null); }}
+        />
       )}
+
+      {/* Hidden picker for the recents list' Replace action. Kept outside the
+          list so a cancelled picker simply leaves nothing to confirm. */}
+      <input
+        ref={replaceInputRef}
+        type="file"
+        accept=".pdf,application/pdf"
+        className="hidden"
+        data-testid="recents-replace-input"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) setReplaceFile(file);
+          e.target.value = "";
+        }}
+      />
 
       <MobileNotice />
     </div>

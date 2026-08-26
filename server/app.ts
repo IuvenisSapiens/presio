@@ -18,6 +18,7 @@ import { registerCheckRoute } from "./routes/check.js";
 import { registerAgentDocRoutes } from "./routes/agentDocs.js";
 import { registerMcpRoutes } from "./routes/mcp.js";
 import type { SocketState } from "./socket.js";
+import { APP_VERSION } from "./version.js";
 
 export interface AppDeps {
   supabase: SupabaseClient;
@@ -37,12 +38,14 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
   app.set("trust proxy", process.env.TRUST_PROXY === "false" ? false : 1);
 
   const allowedOrigins = getAllowedOrigins();
-  // Local/LAN use has no fixed origin to configure ahead of time — a viewer
-  // might reach this server as localhost, a LAN IP, or a hostname, none of
-  // which are known at startup. Accept any origin unless ALLOWED_ORIGIN was
-  // set explicitly (which still takes priority even in local mode).
+  // Development and local/LAN use have no fixed origin to configure ahead of
+  // time — the client can be reached as localhost, a LAN IP, or a hostname
+  // (e.g. `npm run dev` viewed from a phone/tablet on the same network), none
+  // of which are known at startup. Accept any origin unless ALLOWED_ORIGIN was
+  // set explicitly (which still takes priority).
+  const devOrLocal = process.env.NODE_ENV === "development" || isLocalMode;
   const corsOrigin: cors.CorsOptions["origin"] =
-    !allowedOrigins.length && isLocalMode
+    !allowedOrigins.length && devOrLocal
       ? true
       : (origin, callback) => {
           // No Origin header => same-origin / non-browser client (curl, server-to-server).
@@ -108,7 +111,10 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
   // Liveness probe for uptime monitoring (Uptime Kuma). Outside /api so it's
   // not rate-limited, and intentionally cheap — it doesn't touch the DB.
   app.get("/healthz", (_req, res) => {
-    res.json({ status: "ok", uptime: process.uptime() });
+    // `version` is here rather than on its own route so that the one URL
+    // people already curl when a self-hosted deployment misbehaves also
+    // answers "which build is this?".
+    res.json({ status: "ok", uptime: process.uptime(), version: APP_VERSION });
   });
 
   // Live agent discovery docs (host-aware). Before static/SPA so they aren't

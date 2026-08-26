@@ -2,15 +2,17 @@ import { useState } from "react";
 import { Smartphone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DialogOverlay } from "@/components/ui/dialog-overlay";
-import { useIsMobile } from "@/hooks/useIsMobile";
+import { useIsTouchDevice } from "@/hooks/useIsMobile";
 import { lsGetString, lsSetString, STORAGE_KEYS } from "@/lib/storage";
 
-// First-run notice for phones/tablets: Presio's authoring surface is built for
-// desktop, so we set expectations up front and point out the useful mobile role
-// (joining as a viewer, or acting as a remote for a presentation on another
-// screen). Shown once, then remembered.
+// First-run notice for touch devices (phones/tablets, any orientation): Presio's
+// authoring surface is built for desktop, so we set expectations up front and
+// point out the useful mobile role (joining as a viewer, or acting as a remote
+// for a presentation on another screen). Shown once, then remembered.
 export function MobileNotice() {
-  const isMobile = useIsMobile();
+  // Touch-first screen, not width — an iPad in landscape exceeds the mobile
+  // width breakpoint but is every bit a touchscreen.
+  const isMobile = useIsTouchDevice();
   const [open, setOpen] = useState(
     () => lsGetString(STORAGE_KEYS.mobileNoticeSeen) !== "true"
   );

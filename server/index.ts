@@ -9,9 +9,10 @@ import { isLocalMode } from "./local/mode.js";
 import { registerSocketHandlers, createSocketState, clearSessionState } from "./socket.js";
 
 const allowedOrigins = getAllowedOrigins();
-// See app.ts's corsOrigin: local/LAN use has no fixed origin to allow ahead of
-// time, so accept any unless ALLOWED_ORIGIN was set explicitly.
-const io = new Server({ cors: { origin: allowedOrigins.length ? allowedOrigins : isLocalMode ? true : false } });
+// See app.ts's corsOrigin: development and local/LAN use have no fixed origin
+// to allow ahead of time, so accept any unless ALLOWED_ORIGIN was set explicitly.
+const devOrLocal = process.env.NODE_ENV === "development" || isLocalMode;
+const io = new Server({ cors: { origin: allowedOrigins.length ? allowedOrigins : devOrLocal ? true : false } });
 
 const socketState = createSocketState();
 const app = createApp({ supabase, io, socketState });

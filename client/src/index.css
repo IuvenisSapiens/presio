@@ -40,22 +40,42 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/* Home2 marquee — holds on the first statements, then scrolls slowly. */
+@theme {
+  --animate-marquee: marquee 32s linear 2.5s infinite;
+
+  @keyframes marquee {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-50%);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee {
+    animation: none;
+  }
+}
+
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --background: oklch(0.985 0 0);
+  --foreground: oklch(0.13 0 0);
+  --card: oklch(0.985 0 0);
+  --card-foreground: oklch(0.13 0 0);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
+  --popover-foreground: oklch(0.13 0 0);
   --primary: oklch(0.205 0 0);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
+  --secondary-foreground: oklch(0.185 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  --muted-foreground: oklch(0.5 0 0);
   --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --accent-foreground: oklch(0.185 0 0);
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
@@ -66,17 +86,17 @@
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
   --sidebar-background: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-foreground: oklch(0.13 0 0);
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-accent-foreground: oklch(0.185 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
+  --background: oklch(0.16 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.145 0 0);
   --card-foreground: oklch(0.985 0 0);
@@ -109,6 +129,19 @@
   --sidebar-ring: oklch(0.439 0 0);
 }
 
+/* Scoped accent tokens for Home2 — the rest of the app stays pure
+   grayscale; this page borrows one warm accent for the redesign. */
+.home2 {
+  --home2-accent: #c97a1f;
+  --home2-accent-soft: rgba(201, 122, 31, 0.12);
+  --home2-grid: rgba(21, 23, 26, 0.06);
+}
+.dark .home2 {
+  --home2-accent: #f2a93c;
+  --home2-accent-soft: rgba(242, 169, 60, 0.14);
+  --home2-grid: rgba(242, 241, 237, 0.06);
+}
+
 @layer base {
   * {
     @apply border-border;
@@ -116,6 +149,20 @@
   body {
     @apply bg-background text-foreground;
     margin: 0;
+  }
+}
+
+/* Installed app (added to the home screen): every surface fits the viewport
+   exactly, so nothing legitimate ever scrolls at the document level. Kill
+   overscroll there so a stray drag can't rubber-band the whole UI around;
+   interior panels (notes, thumbnails, dialogs) keep their own scrolling and
+   their end-of-list bounce. Normal browser tabs don't match this query and
+   scroll exactly as before. */
+@media all and (display-mode: standalone) {
+  html,
+  body {
+    height: 100%;
+    overscroll-behavior: none;
   }
 }
 
