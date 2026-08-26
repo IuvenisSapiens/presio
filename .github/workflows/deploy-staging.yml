@@ -102,6 +102,10 @@ jobs:
           # re-add lands on the right commit whichever direction it moved.
           git -C "$REPO_DIR" worktree remove --force "$WORKTREE" 2>/dev/null || true
           git -C "$REPO_DIR" worktree prune
+          # Belt-and-braces: a directory left behind by a crashed or
+          # overlapping run (not a registered worktree, so the remove above
+          # is a no-op) would otherwise make `add` fail with "already exists".
+          rm -rf "$WORKTREE"
           git -C "$REPO_DIR" worktree add --detach "$WORKTREE" remotes/origin/staging
 
           cd "$WORKTREE"
@@ -109,8 +113,12 @@ jobs:
           echo "DEPLOYED_VERSION=staging-\$SHA"
           # Baked into the image so /healthz reports the deployed commit, which
           # is what the verify step below waits for.
+          # -p is mandatory, not cosmetic: it outranks any COMPOSE_PROJECT_NAME
+          # that $ENV_FILE may set, which would otherwise override this file's
+          # `name:` and put staging in the prod project -- where --remove-orphans
+          # deletes the entire prod stack (outage 2026-08-26).
           APP_VERSION="staging-\$SHA" \
-            docker compose --env-file "$ENV_FILE" -f docker-compose.staging.yml up -d --build
+            docker compose -p presio-staging --env-file "$ENV_FILE" -f docker-compose.staging.yml up -d --build --remove-orphans
           docker image prune -f >/dev/null
           EOF
 
