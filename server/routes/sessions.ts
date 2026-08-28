@@ -9,7 +9,7 @@ import { getBearerToken, resolveOptionalUserId, safeEqual } from "../auth.js";
 import { isLocalMode } from "../local/mode.js";
 import { clearSessionState, type SocketState } from "../socket.js";
 import { baseUrl } from "../lib/baseUrl.js";
-import { createPresentHandoff, handoffTokenFrom } from "../lib/presentHandoff.js";
+import { createPresentHandoff, handoffTokenFrom, updatePresentDeck } from "../lib/presentHandoff.js";
 import { generatePassphrase, insertSession, ownedExpiry } from "../lib/sessionRows.js";
 
 export interface RouteDeps {
@@ -22,6 +22,19 @@ export interface RouteDeps {
 // expire (and are marked 'expired' on end), so this caps concurrent —
 // not lifetime — presentations.
 export const MAX_CONCURRENT_PRESENTATIONS = 3;
+
+/**
+ * Read a multipart text field that may legitimately appear at most once.
+ * Multer hands a repeated field back as an array, which a bare
+ * `typeof x === "string"` check silently reads as "absent" — on /api/present
+ * that turned a duplicated `session_id` into a brand new presentation, burning
+ * a concurrent slot and handing back a fresh link. `null` means "sent more than
+ * once" so callers can reject instead of guessing which copy was meant.
+ */
+function singleField(value: unknown): string | null {
+  if (value === undefined) return "";
+  return typeof value === "string" ? value : null;
+}
 
 export function registerSessionRoutes(app: express.Express, { supabase, io, socketState }: RouteDeps) {
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -56,6 +69,11 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
    *
    *   curl -s -F file=@deck.pdf https://presio.xyz/api/present
    *   # open the returned url
+   *
+   * Update mode: pass `session_id` (multipart field) plus its controller token
+   * (`controller_token` field or `x-controller-token` header) to replace an
+   * existing presentation's deck instead of creating one — the response keeps
+   * the same id/link and no extra concurrent slot is used.
    */
   app.post("/api/present", uploadField("file"), async (req, res) => {
     try {
@@ -66,6 +84,51 @@ export function registerSessionRoutes(app: express.Express, { supabase, io, sock
       }
       if (file.mimetype !== "application/pdf" && !file.originalname.toLowerCase().endsWith(".pdf")) {
         res.status(400).json({ error: "File must be a PDF" });
+        return;
+      }
+
+      const rawSessionId = singleField(req.body.session_id);
+      const rawToken = singleField(req.body.controller_token);
+      if (rawSessionId === null || rawToken === null) {
+        res.status(400).json({
+          error: 'Send "session_id" and "controller_token" at most once each',
+        });
+        return;
+      }
+
+      const sessionId = rawSessionId.trim();
+      if (sessionId) {
+        // The token is compared byte-for-byte, so it is never trimmed.
+        const token = rawToken || req.get("x-controller-token") || "";
+        if (!token) {
+          // Reject rather than falling back to create: silently minting a new
+          // presentation would hand the agent a fresh link and consume a slot.
+          res.status(401).json({
+            error: 'A controller token is required to update an existing presentation ("controller_token" field or "x-controller-token" header)',
+          });
+          return;
+        }
+        const result = await updatePresentDeck(supabase, {
+          sessionId,
+          token,
+          buffer: file.buffer,
+          originalName: file.originalname,
+          baseUrl: baseUrl(req),
+          io,
+          socketState,
+        });
+        if (!result.ok) {
+          res.status(result.status).json({ error: result.error });
+          return;
+        }
+        res.json({
+          id: result.id,
+          url: result.url,
+          filename: result.filename,
+          totalSlides: result.totalSlides,
+          next: result.next,
+          updated: true,
+        });
         return;
       }
 
