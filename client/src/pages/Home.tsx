@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { getDocument } from "pdfjs-dist";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ExternalLink, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AccountControl } from "@/components/AccountControl";
@@ -9,12 +9,14 @@ import { PresioLogo } from "@/components/PresioLogo";
 import { MobileNotice } from "@/components/MobileNotice";
 import { CodeBlock } from "@/components/CodeBlock";
 import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
-import { idbPut, idbList } from "@/lib/localStore";
-import { getSessionAuth, setSessionAuth } from "@/lib/utils";
-import { lsRemove, annotationsKey } from "@/lib/storage";
+import { ConfirmEndDialog } from "@/components/controller/ConfirmEndDialog";
+import { idbPut, idbList, idbDelete } from "@/lib/localStore";
+import { getSessionAuth, setSessionAuth, endSession } from "@/lib/utils";
+import { lsRemove, annotationsKey, sessionKey } from "@/lib/storage";
 import { track, sha256Hex } from "@/lib/analytics";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
 import { supabase } from "@/lib/supabaseClient";
+import { useAuth } from "@/lib/useAuth";
 import "@/lib/pdf"; // ensure pdf.js worker is configured
 
 const TYPST_PACKAGE_URL = "https://github.com/benedict-armstrong/presio-typst-package";
@@ -231,14 +233,18 @@ function formatRecentDate(ts: number): string {
 // decks come from IndexedDB; synced ones are discovered through the controller
 // credentials this browser holds (created+synced here, or taken over via
 // passphrase) — the IndexedDB record is deleted on claim, so without the
-// credential scan a shared deck would vanish from the list.
+// credential scan a shared deck would vanish from the list. Account decks come
+// from the signed-in user's server-side list, so they show up on any device
+// they sign in on, with the controller token the server legitimately holds.
 interface RecentDeck {
   id: string;
   filename: string;
   totalSlides: number;
   /** Present only for local decks (IndexedDB creation time). */
   createdAt: number | null;
-  kind: "local" | "synced";
+  kind: "local" | "synced" | "account";
+  /** Account decks only: the controller token returned by /api/sessions/mine. */
+  controllerToken?: string;
 }
 
 const SESSION_KEY_RE = /^session_([A-Z0-9]{6})$/;
@@ -282,8 +288,40 @@ async function listControlledSynced(): Promise<RecentDeck[]> {
   return out;
 }
 
+// Decks the signed-in account owns server-side. Anonymous visitors must make
+// zero extra network round-trips, so the fetch is skipped entirely when no
+// session token exists — signing out drops the list back to local-only for free.
+async function listAccountSynced(): Promise<RecentDeck[]> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) return [];
+  try {
+    const res = await fetch("/api/sessions/mine", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return [];
+    const rows = (await res.json()) as {
+      id: string;
+      filename: string;
+      total_slides: number;
+      controllerToken: string;
+    }[];
+    return rows.map((row) => ({
+      id: row.id,
+      filename: row.filename,
+      totalSlides: row.total_slides,
+      createdAt: null,
+      kind: "account",
+      controllerToken: row.controllerToken,
+    }));
+  } catch {
+    return []; // offline or server unreachable: skip rather than block the page
+  }
+}
+
 export default function Home() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -305,6 +343,8 @@ export default function Home() {
   const [replaceTarget, setReplaceTarget] = useState<RecentDeck | null>(null);
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
   const [replacing, setReplacing] = useState(false);
+  const [closeTarget, setCloseTarget] = useState<RecentDeck | null>(null);
+  const [closing, setClosing] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -320,12 +360,20 @@ export default function Home() {
           }))
         )
         .catch(() => [] as RecentDeck[]);
-      const controlled = await listControlledSynced();
+      // Independent lookups: the credential scan hits /api/sessions/:id per
+      // stored token, the account list is a single call. Running them together
+      // keeps the slower one off the critical path.
+      const [controlled, account] = await Promise.all([
+        listControlledSynced(),
+        listAccountSynced(),
+      ]);
       if (cancelled) return;
       // Locals first (they carry a creation date), then synced decks this
-      // browser holds credentials for; dedupe by id, preferring the local copy.
+      // browser holds credentials for, then the account's remaining synced
+      // decks (visible from any device); dedupe by id, preferring the earlier
+      // kind — local > locally-controlled synced > account-only.
       const byId = new Map<string, RecentDeck>();
-      for (const deck of [...locals, ...controlled]) {
+      for (const deck of [...locals, ...controlled, ...account]) {
         if (!byId.has(deck.id)) byId.set(deck.id, deck);
       }
       setRecents([...byId.values()]);
@@ -333,13 +381,74 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [uploading]);
+    // Re-listing on the user id means signing in pulls the account's decks in
+    // and signing out drops back to local-only.
+  }, [uploading, user?.id]);
 
   const pickReplace = useCallback((target: RecentDeck) => {
     setReplaceFile(null);
     setReplaceTarget(target);
     replaceInputRef.current?.click();
   }, []);
+
+  // The whole recents row opens its controller. An account-only deck has never
+  // been opened on this device, so persist the controller token the server
+  // returned first — the socket join and the replace endpoint authorize with it.
+  const openRecent = useCallback(
+    (r: RecentDeck) => {
+      if (r.kind === "account" && r.controllerToken) {
+        // Spread what's already stored: setSessionAuth writes the whole record,
+        // so assigning a bare { controllerToken } would drop a passphrase.
+        setSessionAuth(r.id, { ...getSessionAuth(r.id), controllerToken: r.controllerToken });
+      }
+      navigate(`/s/${r.id}?role=controller`);
+    },
+    [navigate]
+  );
+
+  // Close (end) a presentation. A local deck's PDF only ever lived in this
+  // browser, so ending it means deleting that IndexedDB copy — the same
+  // teardown the controller runs in Presentation.tsx. A synced deck is ended
+  // for everyone on the server: viewers are disconnected, the stored PDF is
+  // dropped and the row is marked expired. Neither is recoverable, hence the
+  // confirm dialog.
+  const confirmClose = useCallback(async () => {
+    if (!closeTarget || closing) return;
+    setClosing(true);
+    setError("");
+    try {
+      if (closeTarget.kind === "local") {
+        await idbDelete(closeTarget.id);
+        // A local session is presented from two windows in the same browser;
+        // the viewer has no server to hear from, so tell it directly on the
+        // channel Presentation listens on. Same message endPresentation sends.
+        try {
+          const channel = new BroadcastChannel(`presio-${closeTarget.id}`);
+          channel.postMessage({ type: "session_ended" });
+          channel.close();
+        } catch {
+          // No BroadcastChannel (or it's blocked): the deck is gone either way.
+        }
+      } else {
+        const res = await endSession(closeTarget.id, closeTarget.controllerToken);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || "Failed to close the presentation");
+        }
+      }
+      // The stored controller credential is dead weight either way.
+      lsRemove(sessionKey(closeTarget.id));
+      setRecents((rs) => rs.filter((r) => r.id !== closeTarget.id));
+      setCloseTarget(null);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to close the presentation");
+      // Dismiss the dialog too: the error renders on the page behind it, so
+      // leaving it up looks like the button simply did nothing.
+      setCloseTarget(null);
+    } finally {
+      setClosing(false);
+    }
+  }, [closeTarget, closing]);
 
   const confirmReplace = useCallback(async () => {
     if (!replaceTarget || !replaceFile || replacing) return;
@@ -370,11 +479,17 @@ export default function Home() {
         }
       } else {
         // Synced deck: overwrite its server copy. The controller token this
-        // browser holds authorizes the write; a logged-in owner token is
-        // attached too when present (the server accepts either).
-        const { controllerToken } = getSessionAuth(replaceTarget.id);
+        // browser holds authorizes the write — for an account deck this device
+        // never controlled, fall back to the token /api/sessions/mine returned.
+        // A logged-in owner token is attached too when present (the server
+        // accepts either).
+        const stored = getSessionAuth(replaceTarget.id);
+        const controllerToken = stored.controllerToken ?? replaceTarget.controllerToken;
         if (!controllerToken) {
           throw new Error("This browser isn't the controller for this presentation");
+        }
+        if (!stored.controllerToken) {
+          setSessionAuth(replaceTarget.id, { ...stored, controllerToken });
         }
         const headers: Record<string, string> = { "x-controller-token": controllerToken };
         const { data: sessionData } = await supabase.auth.getSession();
@@ -746,30 +861,32 @@ export default function Home() {
                   </div>
                   <ul className="space-y-1.5">
                     {recents.map((r) => (
+                      // The open action is its own button rather than a
+                      // clickable row: nesting Replace/Close inside a
+                      // `role="button"` row is invalid ARIA, and Enter/Space on
+                      // an inner button would activate both it and the row.
                       <li
                         key={r.id}
-                        className="flex items-center gap-2 rounded-md border px-3 py-2"
+                        className="flex items-center gap-2 rounded-md border px-3 py-2 transition-colors focus-within:border-muted-foreground/50 hover:border-muted-foreground/50"
                       >
-                        <div className="min-w-0 flex-1">
+                        <button
+                          type="button"
+                          aria-label={`Open ${r.filename}`}
+                          onClick={() => openRecent(r)}
+                          className="min-w-0 flex-1 cursor-pointer rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--home2-accent)]"
+                        >
                           <p className="truncate text-sm font-medium">{r.filename}</p>
                           <p className="text-xs text-muted-foreground">
                             {r.totalSlides} {r.totalSlides === 1 ? "slide" : "slides"}
                             {" · "}
                             <span
-                              className={r.kind === "synced" ? "text-(--home2-accent)" : undefined}
+                              className={r.kind === "local" ? undefined : "text-(--home2-accent)"}
                             >
-                              {r.kind === "synced" ? "shared" : "local"}
+                              {r.kind === "local" ? "local" : r.kind === "synced" ? "shared" : "synced"}
                             </span>
                             {r.createdAt !== null && ` · ${formatRecentDate(r.createdAt)}`}
                           </p>
-                        </div>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => navigate(`/s/${r.id}?role=controller`)}
-                        >
-                          Open
-                        </Button>
+                        </button>
                         <Button
                           size="sm"
                           variant="ghost"
@@ -779,6 +896,20 @@ export default function Home() {
                         >
                           <RefreshCw size={14} />
                           Replace
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={
+                            r.kind === "local"
+                              ? "Delete this presentation from this browser — cannot be undone"
+                              : "End this presentation for everyone — cannot be undone"
+                          }
+                          disabled={closing}
+                          onClick={() => setCloseTarget(r)}
+                        >
+                          <X size={14} />
+                          Close
                         </Button>
                       </li>
                     ))}
@@ -989,6 +1120,14 @@ Hello world.
         <ConfirmReplaceDialog
           onConfirm={confirmReplace}
           onClose={() => { setReplaceTarget(null); setReplaceFile(null); }}
+        />
+      )}
+
+      {closeTarget && (
+        <ConfirmEndDialog
+          local={closeTarget.kind === "local"}
+          onConfirm={confirmClose}
+          onClose={() => setCloseTarget(null)}
         />
       )}
 
