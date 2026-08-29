@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { getDocument } from "pdfjs-dist";
-import { ExternalLink, RefreshCw, X } from "lucide-react";
+import { ExternalLink, RefreshCw, X, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AccountControl } from "@/components/AccountControl";
@@ -11,9 +11,10 @@ import { CodeBlock } from "@/components/CodeBlock";
 import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
 import { ConfirmReuploadDialog } from "@/components/controller/ConfirmReuploadDialog";
 import { ConfirmEndDialog } from "@/components/controller/ConfirmEndDialog";
-import { idbPut, idbList, idbDelete } from "@/lib/localStore";
+import { idbPut, idbGet, idbList, idbDelete } from "@/lib/localStore";
+import { isDeckWatchSupported, PDF_PICKER_OPTIONS } from "@/lib/deckWatcher";
 import { getSessionAuth, setSessionAuth, endSession } from "@/lib/utils";
-import { lsRemove, annotationsKey, sessionKey } from "@/lib/storage";
+import { lsRemove, lsSetString, annotationsKey, sessionKey, deckWatchKey } from "@/lib/storage";
 import { track, sha256Hex } from "@/lib/analytics";
 import { matchReupload } from "@/lib/reupload";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
@@ -268,6 +269,9 @@ interface ReuploadPrompt {
   totalSlides: number;
   /** Whether the file's bytes were actually compared (local decks only). */
   compared: boolean;
+  /** File System Access handle for the drop, when the browser provided one —
+   * persisted with the update so the deck stays watchable afterwards. */
+  handle?: FileSystemFileHandle;
 }
 
 async function listControlledSynced(): Promise<RecentDeck[]> {
@@ -364,10 +368,15 @@ export default function Home() {
   const replaceInputRef = useRef<HTMLInputElement | null>(null);
   const [replaceTarget, setReplaceTarget] = useState<RecentDeck | null>(null);
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
+  const [replaceHandle, setReplaceHandle] = useState<FileSystemFileHandle | null>(null);
   const [replacing, setReplacing] = useState(false);
   const [reuploadPrompt, setReuploadPrompt] = useState<ReuploadPrompt | null>(null);
   const [closeTarget, setCloseTarget] = useState<RecentDeck | null>(null);
   const [closing, setClosing] = useState(false);
+  // Whether a deck created from here should watch its file for recompiles.
+  // Only meaningful where the browser can hold a file handle at all.
+  const watchSupported = isDeckWatchSupported();
+  const [hotReload, setHotReload] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -411,7 +420,26 @@ export default function Home() {
 
   const pickReplace = useCallback((target: RecentDeck) => {
     setReplaceFile(null);
+    setReplaceHandle(null);
     setReplaceTarget(target);
+    // Chromium picks via showOpenFilePicker so the replacement keeps a
+    // watchable file handle (the plain input can't provide one); other
+    // browsers fall back to the input.
+    if (isDeckWatchSupported()) {
+      window.showOpenFilePicker?.(PDF_PICKER_OPTIONS)
+        .then(async ([handle]) => {
+          const file = await handle.getFile();
+          if (file.type !== "application/pdf") {
+            setReplaceTarget(null);
+            setError("Please choose a PDF file");
+            return;
+          }
+          setReplaceHandle(handle);
+          setReplaceFile(file);
+        })
+        .catch(() => setReplaceTarget(null)); // cancelled: nothing to confirm
+      return;
+    }
     replaceInputRef.current?.click();
   }, []);
 
@@ -477,7 +505,7 @@ export default function Home() {
   // Swap a deck's PDF in place under the same code — the body shared by the
   // recents list' Replace button and the re-upload prompt's Update action.
   const replaceDeck = useCallback(
-    async (target: RecentDeck, file: File) => {
+    async (target: RecentDeck, file: File, handle?: FileSystemFileHandle) => {
       const buf = await file.arrayBuffer();
       // Snapshot the bytes before getDocument() transfers the buffer to the
       // pdf.js worker and detaches it (same ordering as upload()).
@@ -495,13 +523,19 @@ export default function Home() {
       const filename = file.name.replace(/\.pdf$/i, "");
       if (target.kind === "local") {
         try {
+          // Read the record to carry over what the fresh object doesn't know:
+          // the original creation time, and the watchable file handle (kept
+          // when the replacement arrived without one, replaced when a new
+          // handle was captured — a recompile usually lands on the same path).
+          const rec = await idbGet(target.id).catch(() => null);
           await idbPut({
             id: target.id,
             filename,
             totalSlides,
             blob,
             sha256,
-            createdAt: target.createdAt ?? Date.now(),
+            createdAt: rec?.createdAt ?? target.createdAt ?? Date.now(),
+            handle: handle ?? rec?.handle,
           });
         } catch {
           throw new Error(
@@ -568,15 +602,16 @@ export default function Home() {
     setReplacing(true);
     setError("");
     try {
-      await replaceDeck(replaceTarget, replaceFile);
+      await replaceDeck(replaceTarget, replaceFile, replaceHandle ?? undefined);
       setReplaceTarget(null);
       setReplaceFile(null);
+      setReplaceHandle(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to replace the PDF");
     } finally {
       setReplacing(false);
     }
-  }, [replaceTarget, replaceFile, replacing, replaceDeck]);
+  }, [replaceTarget, replaceFile, replaceHandle, replacing, replaceDeck]);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
@@ -592,6 +627,7 @@ export default function Home() {
       sha256?: string;
       filename: string;
       totalSlides: number;
+      handle?: FileSystemFileHandle;
     }) => {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       const { data: sessionData } = await supabase.auth.getSession();
@@ -611,6 +647,7 @@ export default function Home() {
           totalSlides: p.totalSlides,
           blob: p.blob,
           sha256: p.sha256,
+          ...(p.handle ? { handle: p.handle } : {}),
           createdAt: Date.now(),
         });
       } catch {
@@ -618,17 +655,21 @@ export default function Home() {
           "Couldn't store the presentation in this browser. Private/incognito mode isn't supported — please use a normal window."
         );
       }
+      // Remember how this deck should treat recompiles. The handle is stored
+      // either way, so the controller's live-reload control can turn watching
+      // on later without asking for the file again.
+      lsSetString(deckWatchKey(id), p.handle && hotReload ? "prompt" : "off");
       // Counted only once the deck is durably stored; the analytics sink
       // timestamps each event, so two uploads of the same filename can be
       // compared by hash to spot recompiled vs. re-uploaded decks.
       track("upload", { filename: p.filename, sha256: p.sha256, size: p.file.size, slides: p.totalSlides });
       navigate(`/s/${id}/share`);
     },
-    [navigate]
+    [navigate, hotReload]
   );
 
   const upload = useCallback(
-    async (file: File) => {
+    async (file: File, handle?: FileSystemFileHandle) => {
       setError("");
       setUploading(true);
       setProgress(0);
@@ -683,10 +724,11 @@ export default function Home() {
             filename,
             totalSlides,
             compared: match.compared,
+            handle,
           });
           return;
         }
-        await createDeck({ file, blob, sha256, filename, totalSlides });
+        await createDeck({ file, blob, sha256, filename, totalSlides, handle });
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "Upload failed");
       } finally {
@@ -703,7 +745,7 @@ export default function Home() {
     setReplacing(true);
     setError("");
     try {
-      await replaceDeck(reuploadPrompt.target, reuploadPrompt.file);
+      await replaceDeck(reuploadPrompt.target, reuploadPrompt.file, reuploadPrompt.handle);
       setReuploadPrompt(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to replace the PDF");
@@ -773,11 +815,52 @@ export default function Home() {
       e.preventDefault();
       setDragging(false);
       const file = e.dataTransfer.files[0];
-      if (file?.type === "application/pdf") upload(file);
-      else setError("Please drop a PDF file");
+      if (file?.type !== "application/pdf") {
+        setError("Please drop a PDF file");
+        return;
+      }
+      // Capture a File System Access handle synchronously, before the event
+      // object goes away, so the deck can be watched later. Falls back to the
+      // plain File — no handle, no watching, everything else unchanged. Only
+      // trusted for a single-file drop: with several items, items[0] might
+      // not be the file the bytes came from.
+      const items = e.dataTransfer.items;
+      const item = items.length === 1 ? items[0] : undefined;
+      const getHandle = item?.getAsFileSystemHandle?.bind(item);
+      if (getHandle) {
+        getHandle()
+          .then((h) =>
+            upload(file, h?.kind === "file" ? (h as FileSystemFileHandle) : undefined)
+          )
+          .catch(() => upload(file));
+      } else {
+        upload(file);
+      }
     },
     [upload]
   );
+
+  // Click-to-browse. Chromium opens the File System Access picker so the
+  // picked deck carries a watchable handle; other browsers use the plain
+  // file input and behave exactly as before.
+  const openFilePicker = useCallback(() => {
+    if (isDeckWatchSupported()) {
+      window.showOpenFilePicker?.(PDF_PICKER_OPTIONS)
+        .then(async ([handle]) => {
+          const file = await handle.getFile();
+          // The picker's filter is a hint, not a guarantee — check the same way
+          // the drop path does rather than failing deep inside pdf.js.
+          if (file.type !== "application/pdf") {
+            setError("Please choose a PDF file");
+            return;
+          }
+          upload(file, handle);
+        })
+        .catch(() => { /* cancelled */ });
+      return;
+    }
+    document.getElementById("home2-file-input")?.click();
+  }, [upload]);
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     if (e.dataTransfer.types.includes("Files")) {
@@ -851,12 +934,25 @@ export default function Home() {
             </div>
 
             <div className="py-6">
+              {/* Live reload needs the File System Access API, which only
+                  Chromium ships. Worth telling everyone else it exists —
+                  it's the difference between one drop and thirty. */}
+              {!watchSupported && (
+                <div className="mb-3 flex items-start gap-2 rounded-lg border border-muted-foreground/20 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                  <Zap size={14} className="mt-px shrink-0 text-(--home2-accent)" />
+                  <p>
+                    <span className="font-medium text-foreground">Writing your talk?</span> In
+                    Chrome, Edge or another Chromium browser, Presio can watch this PDF on disk and
+                    offer the new slides each time you recompile.
+                  </p>
+                </div>
+              )}
               <div
                 className={`cursor-pointer rounded-xl border-2 border-dashed px-9 py-14 text-center transition-colors ${dragging
                   ? "border-(--home2-accent) bg-(--home2-accent-soft)"
                   : "border-muted-foreground/25 hover:border-muted-foreground/50"
                   }`}
-                onClick={() => document.getElementById("home2-file-input")?.click()}
+                onClick={openFilePicker}
               >
                 {uploading ? (
                   <div className="mx-auto w-full max-w-xs space-y-2">
@@ -896,6 +992,24 @@ export default function Home() {
                   onChange={onFileSelect}
                 />
               </div>
+
+              {/* Outside the drop zone: a click in here must not open the
+                  file picker. */}
+              {watchSupported && (
+                <label className="mt-3 flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={hotReload}
+                    onChange={(e) => setHotReload(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-(--home2-accent)"
+                  />
+                  <span>
+                    <span className="font-medium text-foreground">Live reload</span> — watch this
+                    file and offer the new slides when you recompile. You&apos;re always asked
+                    before anything changes on screen; switch it off any time from the controller.
+                  </span>
+                </label>
+              )}
 
               <form onSubmit={submitUrl} className="mt-3.5 flex gap-2">
                 <input
@@ -1245,7 +1359,7 @@ Hello world.
       {replaceTarget && replaceFile && (
         <ConfirmReplaceDialog
           onConfirm={confirmReplace}
-          onClose={() => { setReplaceTarget(null); setReplaceFile(null); }}
+          onClose={() => { setReplaceTarget(null); setReplaceFile(null); setReplaceHandle(null); }}
         />
       )}
 
