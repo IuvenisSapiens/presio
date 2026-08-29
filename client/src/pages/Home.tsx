@@ -9,11 +9,13 @@ import { PresioLogo } from "@/components/PresioLogo";
 import { MobileNotice } from "@/components/MobileNotice";
 import { CodeBlock } from "@/components/CodeBlock";
 import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
+import { ConfirmReuploadDialog } from "@/components/controller/ConfirmReuploadDialog";
 import { ConfirmEndDialog } from "@/components/controller/ConfirmEndDialog";
 import { idbPut, idbList, idbDelete } from "@/lib/localStore";
 import { getSessionAuth, setSessionAuth, endSession } from "@/lib/utils";
 import { lsRemove, annotationsKey, sessionKey } from "@/lib/storage";
 import { track, sha256Hex } from "@/lib/analytics";
+import { matchReupload } from "@/lib/reupload";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
 import { supabase } from "@/lib/supabaseClient";
 import { useAuth } from "@/lib/useAuth";
@@ -242,12 +244,31 @@ interface RecentDeck {
   totalSlides: number;
   /** Present only for local decks (IndexedDB creation time). */
   createdAt: number | null;
+  /** Local decks only: SHA-256 of the stored PDF's bytes, when known — lets a
+   * re-drop be recognised as byte-identical without touching the blob. */
+  sha256?: string;
   kind: "local" | "synced" | "account";
   /** Account decks only: the controller token returned by /api/sessions/mine. */
   controllerToken?: string;
 }
 
 const SESSION_KEY_RE = /^session_([A-Z0-9]{6})$/;
+
+// A dropped file that matched a known presentation and is waiting on the
+// update-vs-create prompt. The decoded blob is kept so "Create separate"
+// doesn't re-read or re-parse the file. (The ArrayBuffer it came from is not:
+// getDocument() has already transferred it to the pdf.js worker by this point,
+// leaving it detached.)
+interface ReuploadPrompt {
+  target: RecentDeck;
+  file: File;
+  blob: Blob;
+  sha256?: string;
+  filename: string;
+  totalSlides: number;
+  /** Whether the file's bytes were actually compared (local decks only). */
+  compared: boolean;
+}
 
 async function listControlledSynced(): Promise<RecentDeck[]> {
   const ids: string[] = [];
@@ -319,6 +340,7 @@ async function listAccountSynced(): Promise<RecentDeck[]> {
   }
 }
 
+
 export default function Home() {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -343,6 +365,7 @@ export default function Home() {
   const [replaceTarget, setReplaceTarget] = useState<RecentDeck | null>(null);
   const [replaceFile, setReplaceFile] = useState<File | null>(null);
   const [replacing, setReplacing] = useState(false);
+  const [reuploadPrompt, setReuploadPrompt] = useState<ReuploadPrompt | null>(null);
   const [closeTarget, setCloseTarget] = useState<RecentDeck | null>(null);
   const [closing, setClosing] = useState(false);
 
@@ -356,6 +379,7 @@ export default function Home() {
             filename: r.filename,
             totalSlides: r.totalSlides,
             createdAt: r.createdAt,
+            sha256: r.sha256,
             kind: "local",
           }))
         )
@@ -450,27 +474,34 @@ export default function Home() {
     }
   }, [closeTarget, closing]);
 
-  const confirmReplace = useCallback(async () => {
-    if (!replaceTarget || !replaceFile || replacing) return;
-    setReplacing(true);
-    setError("");
-    try {
-      const buf = await replaceFile.arrayBuffer();
+  // Swap a deck's PDF in place under the same code — the body shared by the
+  // recents list' Replace button and the re-upload prompt's Update action.
+  const replaceDeck = useCallback(
+    async (target: RecentDeck, file: File) => {
+      const buf = await file.arrayBuffer();
       // Snapshot the bytes before getDocument() transfers the buffer to the
       // pdf.js worker and detaches it (same ordering as upload()).
       const blob = new Blob([buf], { type: "application/pdf" });
+      // Fingerprint the bytes while they're still readable (see upload()).
+      let sha256: string | undefined;
+      try {
+        sha256 = await sha256Hex(buf);
+      } catch {
+        // No crypto.subtle (plain-http origins): track without a fingerprint.
+      }
       const doc = await getDocument({ data: new Uint8Array(buf) }).promise;
       const totalSlides = doc.numPages;
       doc.destroy();
-      const filename = replaceFile.name.replace(/\.pdf$/i, "");
-      if (replaceTarget.kind === "local") {
+      const filename = file.name.replace(/\.pdf$/i, "");
+      if (target.kind === "local") {
         try {
           await idbPut({
-            id: replaceTarget.id,
+            id: target.id,
             filename,
             totalSlides,
             blob,
-            createdAt: replaceTarget.createdAt ?? Date.now(),
+            sha256,
+            createdAt: target.createdAt ?? Date.now(),
           });
         } catch {
           throw new Error(
@@ -483,13 +514,13 @@ export default function Home() {
         // never controlled, fall back to the token /api/sessions/mine returned.
         // A logged-in owner token is attached too when present (the server
         // accepts either).
-        const stored = getSessionAuth(replaceTarget.id);
-        const controllerToken = stored.controllerToken ?? replaceTarget.controllerToken;
+        const stored = getSessionAuth(target.id);
+        const controllerToken = stored.controllerToken ?? target.controllerToken;
         if (!controllerToken) {
           throw new Error("This browser isn't the controller for this presentation");
         }
         if (!stored.controllerToken) {
-          setSessionAuth(replaceTarget.id, { ...stored, controllerToken });
+          setSessionAuth(target.id, { ...stored, controllerToken });
         }
         const headers: Record<string, string> = { "x-controller-token": controllerToken };
         const { data: sessionData } = await supabase.auth.getSession();
@@ -499,7 +530,7 @@ export default function Home() {
         const form = new FormData();
         form.append("pdf", blob, `${filename}.pdf`);
         form.append("filename", filename);
-        const res = await fetch(`/api/sessions/${replaceTarget.id}/pdf`, {
+        const res = await fetch(`/api/sessions/${target.id}/pdf`, {
           method: "POST",
           headers,
           body: form,
@@ -510,33 +541,91 @@ export default function Home() {
         }
       }
       // Drawings are keyed by slide number; a replaced deck invalidates them.
-      lsRemove(annotationsKey(replaceTarget.id));
-      let sha256: string | undefined;
-      try {
-        sha256 = await sha256Hex(buf);
-      } catch {
-        // No crypto.subtle (plain-http origins): track without a fingerprint.
-      }
+      lsRemove(annotationsKey(target.id));
+      // Keep the in-memory recents row in step with the stored record — the
+      // hash must reflect the new bytes for the next re-drop to be matched.
+      setRecents((rs) =>
+        rs.map((r) => (r.id === target.id ? { ...r, filename, totalSlides, sha256 } : r))
+      );
       track("deck-replace", {
         filename,
         sha256,
-        size: replaceFile.size,
+        size: file.size,
         slides: totalSlides,
-        mode: replaceTarget.kind === "local" ? "local" : "server",
+        mode: target.kind === "local" ? "local" : "server",
       });
-      navigate(`/s/${replaceTarget.id}?role=controller`);
+      // A synced replace rewrites the stored object at the same URL, so tell
+      // the controller page to fetch past any copy this browser already has —
+      // it's the one most likely to be holding the pre-replace deck. Viewers
+      // in the room get there by their own route (the deck_updated broadcast).
+      navigate(`/s/${target.id}?role=controller`, { state: { deckReplaced: Date.now() } });
+    },
+    [navigate]
+  );
+
+  const confirmReplace = useCallback(async () => {
+    if (!replaceTarget || !replaceFile || replacing) return;
+    setReplacing(true);
+    setError("");
+    try {
+      await replaceDeck(replaceTarget, replaceFile);
+      setReplaceTarget(null);
+      setReplaceFile(null);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to replace the PDF");
     } finally {
       setReplacing(false);
     }
-  }, [replaceTarget, replaceFile, replacing, navigate]);
+  }, [replaceTarget, replaceFile, replacing, replaceDeck]);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 8);
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+
+  // The plain create path: mint a session, store the deck locally, open share.
+  const createDeck = useCallback(
+    async (p: {
+      file: File;
+      blob: Blob;
+      sha256?: string;
+      filename: string;
+      totalSlides: number;
+    }) => {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      const { data: sessionData } = await supabase.auth.getSession();
+      if (sessionData.session) headers.Authorization = `Bearer ${sessionData.session.access_token}`;
+      const res = await fetch("/api/sessions/local", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ filename: p.filename, total_slides: p.totalSlides }),
+      });
+      if (!res.ok) throw new Error("Failed to create session");
+      const { id, controllerToken, passphrase } = await res.json();
+      if (controllerToken) setSessionAuth(id, { controllerToken, passphrase });
+      try {
+        await idbPut({
+          id,
+          filename: p.filename,
+          totalSlides: p.totalSlides,
+          blob: p.blob,
+          sha256: p.sha256,
+          createdAt: Date.now(),
+        });
+      } catch {
+        throw new Error(
+          "Couldn't store the presentation in this browser. Private/incognito mode isn't supported — please use a normal window."
+        );
+      }
+      // Counted only once the deck is durably stored; the analytics sink
+      // timestamps each event, so two uploads of the same filename can be
+      // compared by hash to spot recompiled vs. re-uploaded decks.
+      track("upload", { filename: p.filename, sha256: p.sha256, size: p.file.size, slides: p.totalSlides });
+      navigate(`/s/${id}/share`);
+    },
+    [navigate]
+  );
 
   const upload = useCallback(
     async (file: File) => {
@@ -570,37 +659,74 @@ export default function Home() {
         const totalSlides = doc.numPages;
         doc.destroy();
         const filename = file.name.replace(/\.pdf$/i, "");
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        const { data: sessionData } = await supabase.auth.getSession();
-        if (sessionData.session) headers.Authorization = `Bearer ${sessionData.session.access_token}`;
-        const res = await fetch("/api/sessions/local", {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ filename, total_slides: totalSlides }),
-        });
-        if (!res.ok) throw new Error("Failed to create session");
-        const { id, controllerToken, passphrase } = await res.json();
-        if (controllerToken) setSessionAuth(id, { controllerToken, passphrase });
-        try {
-          await idbPut({ id, filename, totalSlides, blob, createdAt: Date.now() });
-        } catch {
-          throw new Error(
-            "Couldn't store the presentation in this browser. Private/incognito mode isn't supported — please use a normal window."
-          );
+
+        // Fork on a re-upload before anything is created: the recents list is
+        // already in memory, so the comparison costs no network round-trip and
+        // a no-match drop adds no prompt or delay.
+        const match = await matchReupload(filename, sha256, recents);
+        if (match?.identical) {
+          // Byte-identical re-drop — the person most likely lost their link
+          // rather than changed their deck. Reopen the existing presentation
+          // and create nothing.
+          navigate(`/s/${match.target.id}?role=controller`);
+          return;
         }
-        // Counted only once the deck is durably stored; the analytics sink
-        // timestamps each event, so two uploads of the same filename can be
-        // compared by hash to spot recompiled vs. re-uploaded decks.
-        track("upload", { filename, sha256, size: file.size, slides: totalSlides });
-        navigate(`/s/${id}/share`);
+        if (match) {
+          // Same name, different (or unverifiable) bytes: offer update vs.
+          // create, defaulting to update, before anything exists server-side
+          // or in IndexedDB.
+          setReuploadPrompt({
+            target: match.target,
+            file,
+            blob,
+            sha256,
+            filename,
+            totalSlides,
+            compared: match.compared,
+          });
+          return;
+        }
+        await createDeck({ file, blob, sha256, filename, totalSlides });
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : "Upload failed");
       } finally {
         setUploading(false);
       }
     },
-    [navigate]
+    [navigate, recents, createDeck]
   );
+
+  // Update branch of the re-upload prompt: swap the dropped file into the
+  // matched presentation via the same code path as the recents Replace button.
+  const confirmReuploadUpdate = useCallback(async () => {
+    if (!reuploadPrompt || replacing) return;
+    setReplacing(true);
+    setError("");
+    try {
+      await replaceDeck(reuploadPrompt.target, reuploadPrompt.file);
+      setReuploadPrompt(null);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to replace the PDF");
+    } finally {
+      setReplacing(false);
+    }
+  }, [reuploadPrompt, replacing, replaceDeck]);
+
+  // Create branch of the re-upload prompt: continue down the plain create
+  // path, reusing the already-decoded bytes.
+  const confirmReuploadCreate = useCallback(async () => {
+    if (!reuploadPrompt || uploading) return;
+    setUploading(true);
+    setError("");
+    try {
+      await createDeck(reuploadPrompt);
+      setReuploadPrompt(null);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }, [reuploadPrompt, uploading, createDeck]);
 
   const submitUrl = useCallback(
     async (e: React.FormEvent) => {
@@ -1120,6 +1246,17 @@ Hello world.
         <ConfirmReplaceDialog
           onConfirm={confirmReplace}
           onClose={() => { setReplaceTarget(null); setReplaceFile(null); }}
+        />
+      )}
+
+      {reuploadPrompt && (
+        <ConfirmReuploadDialog
+          filename={reuploadPrompt.filename}
+          code={reuploadPrompt.target.id}
+          compared={reuploadPrompt.compared}
+          onUpdate={confirmReuploadUpdate}
+          onCreate={confirmReuploadCreate}
+          onClose={() => setReuploadPrompt(null)}
         />
       )}
 
