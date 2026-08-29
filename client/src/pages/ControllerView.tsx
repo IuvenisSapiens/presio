@@ -32,6 +32,7 @@ import { ControllerDashboard, type CardEntry } from "@/components/controller/Con
 import { ControllerStack } from "@/components/controller/ControllerStack";
 import { ShareDialog } from "@/components/controller/ShareDialog";
 import { ConfirmEndDialog } from "@/components/controller/ConfirmEndDialog";
+import { useJoinUrls } from "@/lib/joinUrl";
 import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSlideTapNav } from "@/hooks/useSlideTapNav";
@@ -384,8 +385,19 @@ export function ControllerView({
     });
   }, []);
 
-  const controllerUrl = `${window.location.origin}/s/${id}?role=controller`;
+  // Navigations this device performs itself (viewer popup) use the page's own
+  // origin — it always works locally. The share dialog's QR/links honor the
+  // presenter-entered LAN address instead (lib/joinUrl.ts), so phones can scan.
   const viewerUrl = `${window.location.origin}/s/${id}?role=viewer`;
+  const {
+    address: lanAddress,
+    setAddress: setLanAddress,
+    status: lanStatus,
+    origin: lanOrigin,
+    shareable: lanShareable,
+    controllerUrl,
+    viewerUrl: shareViewerUrl,
+  } = useJoinUrls(id);
   const { passphrase = "" } = getSessionAuth(id);
   const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 
@@ -623,8 +635,13 @@ export function ControllerView({
       {shareDialogOpen && (
         <ShareDialog
           id={id}
-          viewerUrl={viewerUrl}
+          viewerUrl={shareViewerUrl}
           controllerUrl={controllerUrl}
+          lanAddress={lanAddress}
+          onLanAddressChange={setLanAddress}
+          lanStatus={lanStatus}
+          lanOrigin={lanOrigin}
+          lanShareable={lanShareable}
           local={local}
           loggedIn={loggedIn}
           syncing={syncing}

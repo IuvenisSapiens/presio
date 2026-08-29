@@ -8,7 +8,9 @@ import { useAuth } from "@/lib/useAuth";
 import { authEnabled } from "@/lib/authMode";
 import { useClaim } from "@/lib/useClaim";
 import { LoginDialog } from "@/components/LoginDialog";
+import { LanAddressField } from "@/components/LanAddressField";
 import { SyncShareOverlay } from "@/components/SyncShareOverlay";
+import { useJoinUrls } from "@/lib/joinUrl";
 
 export default function Share() {
   const { id } = useParams<{ id: string }>();
@@ -20,8 +22,18 @@ export default function Share() {
   const [local, setLocal] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
 
-  const controllerUrl = `${window.location.origin}/s/${id}?role=controller`;
-  const viewerUrl = `${window.location.origin}/s/${id}?role=viewer`;
+  // Share URLs honor a presenter-entered LAN address (lib/joinUrl.ts) so QR
+  // codes scanned from other devices resolve when Presio is opened over
+  // localhost in a local deployment.
+  const {
+    address: lanAddress,
+    setAddress: setLanAddress,
+    status: lanStatus,
+    origin: lanOrigin,
+    shareable: lanShareable,
+    viewerUrl,
+    controllerUrl,
+  } = useJoinUrls(id!);
 
   useEffect(() => {
     let cancelled = false;
@@ -100,8 +112,21 @@ export default function Share() {
 
           {!local && (
             <div className="space-y-3">
-              <CopyRow label="Controller link" url={controllerUrl} />
-              <CopyRow label="Viewer link" url={viewerUrl} />
+              {/* Loopback links are useless to whoever they're handed to, so
+                  they wait until an address other devices can reach is known. */}
+              {lanShareable && (
+                <>
+                  <CopyRow label="Controller link" url={controllerUrl} />
+                  <CopyRow label="Viewer link" url={viewerUrl} />
+                </>
+              )}
+              <LanAddressField
+                value={lanAddress}
+                onChange={setLanAddress}
+                status={lanStatus}
+                origin={lanOrigin}
+                shareable={lanShareable}
+              />
             </div>
           )}
 
