@@ -90,9 +90,12 @@ interface ControllerViewProps {
   /** Live-reload preference, or null when this deck can't be watched. */
   deckWatchMode: DeckWatchMode | null;
   deckWatchStatus: DeckWatchStatus | null;
-  onDeckWatchCycle: () => void;
+  onDeckWatchModeChange: (mode: DeckWatchMode) => void;
   onDeckWatchApply: () => void;
   onDeckWatchResume: () => void;
+  /** A URL-backed deck's source PDF was republished (see Presentation). */
+  remoteDeckUpdate: boolean;
+  onRemoteDeckApply: () => void;
   mediaState: MediaState;
   onMediaControl: (id: string, action: "play" | "pause" | "reset") => void;
   onMediaTime: (id: string, t: number, playing: boolean, sampledAt: number) => void;
@@ -127,9 +130,11 @@ export function ControllerView({
   filename,
   deckWatchMode,
   deckWatchStatus,
-  onDeckWatchCycle,
+  onDeckWatchModeChange,
   onDeckWatchApply,
   onDeckWatchResume,
+  remoteDeckUpdate,
+  onRemoteDeckApply,
   mediaState,
   onMediaControl,
   onMediaTime,
@@ -226,6 +231,12 @@ export function ControllerView({
   const [replacing, setReplacing] = useState(false);
   const onReplacePicked = useCallback((file: File | undefined) => {
     if (file) setReplaceCandidate(file);
+  }, []);
+  // Dropped onto the deck name in the header: same confirmation as a picked
+  // replacement, and the handle (Chromium only) keeps the new deck watchable.
+  const onDeckDropped = useCallback((file: File, handle?: FileSystemFileHandle) => {
+    replaceHandleRef.current = handle ?? null;
+    setReplaceCandidate(file);
   }, []);
   // Chromium picks via showOpenFilePicker so the replacement keeps a watchable
   // handle; other browsers fall back to the plain input (no watching).
@@ -530,9 +541,12 @@ export function ControllerView({
         deckWatchMode={deckWatchMode}
         deckWatchStatus={deckWatchStatus}
         onReplaceDeck={openReplacePicker}
-        onDeckWatchCycle={onDeckWatchCycle}
+        onDropDeck={onDeckDropped}
+        onDeckWatchModeChange={onDeckWatchModeChange}
         onDeckWatchApply={onDeckWatchApply}
         onDeckWatchResume={onDeckWatchResume}
+        remoteDeckUpdate={remoteDeckUpdate}
+        onRemoteDeckApply={onRemoteDeckApply}
         actions={isMobile ? mobileActions : desktopActions}
       />
 

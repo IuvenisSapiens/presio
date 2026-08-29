@@ -19,9 +19,12 @@ export function ControllerHeader({
   deckWatchMode = null,
   deckWatchStatus,
   onReplaceDeck,
-  onDeckWatchCycle,
+  onDropDeck,
+  onDeckWatchModeChange,
   onDeckWatchApply,
   onDeckWatchResume,
+  remoteDeckUpdate = false,
+  onRemoteDeckApply,
   actions,
 }: {
   id: string;
@@ -38,15 +41,40 @@ export function ControllerHeader({
   /** Deck file watching status (lib/deckWatcher). */
   deckWatchStatus?: DeckWatchStatus | null;
   onReplaceDeck?: () => void;
-  onDeckWatchCycle?: () => void;
+  /** A PDF dropped onto the deck name — same swap, without the picker. */
+  onDropDeck?: (file: File, handle?: FileSystemFileHandle) => void;
+  onDeckWatchModeChange?: (mode: DeckWatchMode) => void;
   onDeckWatchApply?: () => void;
   onDeckWatchResume?: () => void;
+  /** A URL-backed deck's source PDF was republished — offer the new version. */
+  remoteDeckUpdate?: boolean;
+  onRemoteDeckApply?: () => void;
   /** Tighter spacing + bare code (no "Code:" label) for the mobile header. */
   compact?: boolean;
   actions?: ReactNode;
 }) {
+  const deck = onReplaceDeck && onDeckWatchModeChange && onDeckWatchApply && onDeckWatchResume && (
+    <DeckControl
+      filename={filename}
+      mode={deckWatchMode}
+      status={deckWatchStatus ?? null}
+      remoteUpdate={remoteDeckUpdate}
+      onReplace={onReplaceDeck}
+      onDropDeck={onDropDeck}
+      onSetMode={onDeckWatchModeChange}
+      onApply={onDeckWatchApply}
+      onResume={onDeckWatchResume}
+      onRemoteApply={onRemoteDeckApply}
+    />
+  );
+
   return (
-    <div className={cn("border-b py-2 flex items-center justify-between", compact ? "px-3" : "px-4")}>
+    <div
+      className={cn(
+        "relative border-b py-2 flex items-center justify-between",
+        compact ? "px-3" : "px-4"
+      )}
+    >
       <div className={cn("flex items-center", compact ? "gap-2" : "gap-3")}>
         <Link
           to="/"
@@ -79,18 +107,19 @@ export function ControllerHeader({
             Code shown
           </span>
         )}
-        {onReplaceDeck && onDeckWatchCycle && onDeckWatchApply && onDeckWatchResume && (
-          <DeckControl
-            filename={filename}
-            mode={deckWatchMode}
-            status={deckWatchStatus ?? null}
-            onReplace={onReplaceDeck}
-            onCycleMode={onDeckWatchCycle}
-            onApply={onDeckWatchApply}
-            onResume={onDeckWatchResume}
-          />
-        )}
+        {compact && deck}
       </div>
+      {/* Desktop centres the deck on the bar itself rather than in the gap
+          between its neighbours, so it doesn't drift as the code or the
+          badges change width. Out of flow, so the wrapper can't swallow
+          clicks meant for the clusters underneath — only the control itself
+          takes pointer events. Mobile has no room for a third column, so it
+          stays inline in the left cluster above. */}
+      {!compact && deck && (
+        <div className="pointer-events-none absolute left-1/2 -translate-x-1/2">
+          <div className="pointer-events-auto">{deck}</div>
+        </div>
+      )}
       <div className="flex items-center gap-1">{actions}</div>
     </div>
   );
