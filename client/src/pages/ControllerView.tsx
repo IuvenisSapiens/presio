@@ -32,9 +32,16 @@ import { ControllerDashboard, type CardEntry } from "@/components/controller/Con
 import { ControllerStack } from "@/components/controller/ControllerStack";
 import { ShareDialog } from "@/components/controller/ShareDialog";
 import { ConfirmEndDialog } from "@/components/controller/ConfirmEndDialog";
+import { useJoinUrls } from "@/lib/joinUrl";
 import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSlideTapNav } from "@/hooks/useSlideTapNav";
+import {
+  isDeckWatchSupported,
+  PDF_PICKER_OPTIONS,
+  type DeckWatchMode,
+  type DeckWatchStatus,
+} from "@/lib/deckWatcher";
 import {
   DEFAULT_KEYMAP,
   loadKeymap,
@@ -73,12 +80,23 @@ interface ControllerViewProps {
   onEnd: () => void;
   onSynced: () => void;
   onSaveNotes: (slide: number, notes: string) => Promise<void>;
-  onReplacePdf: (file: File) => Promise<void>;
+  onReplacePdf: (file: File, handle?: FileSystemFileHandle) => Promise<void>;
   currentCanvasRef: React.RefObject<HTMLDivElement | null>;
   blanked: boolean;
   onBlankToggle: () => void;
   showCode: boolean;
   onShowCodeToggle: () => void;
+  /** The deck on screen, shown in the header's deck control. */
+  filename: string;
+  /** Live-reload preference, or null when this deck can't be watched. */
+  deckWatchMode: DeckWatchMode | null;
+  deckWatchStatus: DeckWatchStatus | null;
+  onDeckWatchModeChange: (mode: DeckWatchMode) => void;
+  onDeckWatchApply: () => void;
+  onDeckWatchResume: () => void;
+  /** A URL-backed deck's source PDF was republished (see Presentation). */
+  remoteDeckUpdate: boolean;
+  onRemoteDeckApply: () => void;
   mediaState: MediaState;
   onMediaControl: (id: string, action: "play" | "pause" | "reset") => void;
   onMediaTime: (id: string, t: number, playing: boolean, sampledAt: number) => void;
@@ -110,6 +128,14 @@ export function ControllerView({
   onBlankToggle,
   showCode,
   onShowCodeToggle,
+  filename,
+  deckWatchMode,
+  deckWatchStatus,
+  onDeckWatchModeChange,
+  onDeckWatchApply,
+  onDeckWatchResume,
+  remoteDeckUpdate,
+  onRemoteDeckApply,
   mediaState,
   onMediaControl,
   onMediaTime,
@@ -200,17 +226,48 @@ export function ControllerView({
   // The File is held in state between the picker and the confirmation dialog.
   const replaceFileRef = useRef<HTMLInputElement | null>(null);
   const [replaceCandidate, setReplaceCandidate] = useState<File | null>(null);
+  // When the pick came from showOpenFilePicker, its handle rides along so the
+  // deck keeps being watchable after the swap (see replacePdf).
+  const replaceHandleRef = useRef<FileSystemFileHandle | null>(null);
   const [replacing, setReplacing] = useState(false);
   const onReplacePicked = useCallback((file: File | undefined) => {
     if (file) setReplaceCandidate(file);
+  }, []);
+  // Dropped onto the deck name in the header: same confirmation as a picked
+  // replacement, and the handle (Chromium only) keeps the new deck watchable.
+  const onDeckDropped = useCallback((file: File, handle?: FileSystemFileHandle) => {
+    replaceHandleRef.current = handle ?? null;
+    setReplaceCandidate(file);
+  }, []);
+  // Chromium picks via showOpenFilePicker so the replacement keeps a watchable
+  // handle; other browsers fall back to the plain input (no watching).
+  const openReplacePicker = useCallback(() => {
+    if (isDeckWatchSupported()) {
+      window.showOpenFilePicker?.(PDF_PICKER_OPTIONS)
+        .then(async ([handle]) => {
+          const file = await handle.getFile();
+          // The picker's filter is a hint, not a guarantee.
+          if (file.type !== "application/pdf") {
+            window.alert("Please choose a PDF file");
+            return;
+          }
+          replaceHandleRef.current = handle;
+          setReplaceCandidate(file);
+        })
+        .catch(() => { /* cancelled: nothing to confirm */ });
+      return;
+    }
+    replaceHandleRef.current = null;
+    replaceFileRef.current?.click();
   }, []);
   const confirmReplace = useCallback(async () => {
     const file = replaceCandidate;
     if (!file || replacing) return;
     setReplacing(true);
     try {
-      await onReplacePdf(file);
+      await onReplacePdf(file, replaceHandleRef.current ?? undefined);
       setReplaceCandidate(null);
+      replaceHandleRef.current = null;
     } catch (e) {
       window.alert(e instanceof Error ? e.message : "Failed to replace the PDF");
     } finally {
@@ -328,8 +385,19 @@ export function ControllerView({
     });
   }, []);
 
-  const controllerUrl = `${window.location.origin}/s/${id}?role=controller`;
+  // Navigations this device performs itself (viewer popup) use the page's own
+  // origin — it always works locally. The share dialog's QR/links honor the
+  // presenter-entered LAN address instead (lib/joinUrl.ts), so phones can scan.
   const viewerUrl = `${window.location.origin}/s/${id}?role=viewer`;
+  const {
+    address: lanAddress,
+    setAddress: setLanAddress,
+    status: lanStatus,
+    origin: lanOrigin,
+    shareable: lanShareable,
+    controllerUrl,
+    viewerUrl: shareViewerUrl,
+  } = useJoinUrls(id);
   const { passphrase = "" } = getSessionAuth(id);
   const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 
@@ -460,7 +528,7 @@ export function ControllerView({
       onToggleCode={onShowCodeToggle}
       onShowPassphrase={() => setPassphraseDialogOpen(true)}
       onSwitchToViewer={() => navigate(`/s/${id}?role=viewer`, { replace: true })}
-      onReplaceClick={() => replaceFileRef.current?.click()}
+      onReplaceClick={openReplacePicker}
       onEndClick={() => setConfirmEnd(true)}
     />
   );
@@ -481,6 +549,16 @@ export function ControllerView({
         blanked={blanked}
         showingCode={showCode && !local}
         compact={isMobile}
+        filename={filename}
+        deckWatchMode={deckWatchMode}
+        deckWatchStatus={deckWatchStatus}
+        onReplaceDeck={openReplacePicker}
+        onDropDeck={onDeckDropped}
+        onDeckWatchModeChange={onDeckWatchModeChange}
+        onDeckWatchApply={onDeckWatchApply}
+        onDeckWatchResume={onDeckWatchResume}
+        remoteDeckUpdate={remoteDeckUpdate}
+        onRemoteDeckApply={onRemoteDeckApply}
         actions={isMobile ? mobileActions : desktopActions}
       />
 
@@ -557,8 +635,13 @@ export function ControllerView({
       {shareDialogOpen && (
         <ShareDialog
           id={id}
-          viewerUrl={viewerUrl}
+          viewerUrl={shareViewerUrl}
           controllerUrl={controllerUrl}
+          lanAddress={lanAddress}
+          onLanAddressChange={setLanAddress}
+          lanStatus={lanStatus}
+          lanOrigin={lanOrigin}
+          lanShareable={lanShareable}
           local={local}
           loggedIn={loggedIn}
           syncing={syncing}
@@ -630,7 +713,7 @@ export function ControllerView({
                 variant="outline"
                 data-testid="deck-replace"
                 disabled={replacing}
-                onClick={() => replaceFileRef.current?.click()}
+                onClick={openReplacePicker}
               >
                 <RefreshCw size={14} className={cn("mr-1", replacing && "animate-spin")} />
                 {replacing ? "Replacing…" : "Replace PDF…"}

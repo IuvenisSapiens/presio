@@ -152,6 +152,179 @@ export function buildOpenApi(base: string) {
           },
         },
       },
+      "/api/sessions/mine": {
+        get: {
+          summary: "List the signed-in user's live synced presentations",
+          description:
+            "Every non-expired synced presentation owned by the authenticated user, newest first. Each row carries its controller token — the owner is entitled to it, so any device the user signs in on can open the controller. Not available in local mode.",
+          operationId: "mySessions",
+          parameters: [
+            {
+              name: "Authorization",
+              in: "header",
+              required: true,
+              schema: { type: "string" },
+              description: "Bearer Presio login JWT",
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Live synced presentations, newest first",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      required: ["id", "filename", "total_slides", "controllerToken"],
+                      properties: {
+                        id: { type: "string" },
+                        filename: { type: "string" },
+                        total_slides: { type: "integer" },
+                        created_at: { type: "string", format: "date-time" },
+                        expires_at: { type: "string", format: "date-time" },
+                        controllerToken: { type: "string" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+            "401": { description: "Missing or invalid bearer token" },
+          },
+        },
+      },
+      "/api/sessions/{id}/remote-version": {
+        get: {
+          summary: "Change-detection metadata for a URL-backed deck's remote PDF",
+          description:
+            "Probes the deck's source URL with a HEAD request (one-byte ranged GET fallback) and returns its validator headers, so a running controller can tell whether the remote PDF was republished — without downloading it. Only for presentations backed by an external PDF URL. The probe is https-only and restricted to public addresses (loopback, private and link-local targets are refused, and redirects are re-checked at every hop).",
+          operationId: "remoteSessionVersion",
+          parameters: [
+            { name: "id", in: "path", required: true, schema: { type: "string" } },
+            {
+              name: "x-controller-token",
+              in: "header",
+              required: true,
+              schema: { type: "string" },
+              description: "Controller token (or Authorization: Bearer for the logged-in owner)",
+            },
+          ],
+          responses: {
+            "200": {
+              description: "Validator tuple; each field is \"\" when the host does not send it",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["etag", "lastModified", "contentLength"],
+                    properties: {
+                      etag: { type: "string" },
+                      lastModified: { type: "string" },
+                      contentLength: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+            "403": { description: "Wrong controller token" },
+            "404": {
+              description:
+                "Unknown or expired session, or the presentation is not backed by an external URL (local and server-hosted decks have no pdf_url) — nothing to watch",
+            },
+            "502": {
+              description:
+                "The remote host could not be reached, or the URL is one the server refuses to fetch",
+            },
+          },
+        },
+      },
+      "/api/sessions/{id}/deck-refreshed": {
+        post: {
+          summary: "Announce a republished URL-backed deck to the room",
+          description:
+            "The presenter accepted a deck that was republished at its source URL. Records the new page count, clamps the stored current slide into range, drops the stored drawings, and broadcasts deck_updated so every connected client re-fetches the source URL. No bytes are uploaded — pdf_url decks keep no server copy.",
+          operationId: "deckRefreshed",
+          parameters: [
+            { name: "id", in: "path", required: true, schema: { type: "string" } },
+            {
+              name: "x-controller-token",
+              in: "header",
+              required: true,
+              schema: { type: "string" },
+              description: "Controller token (or Authorization: Bearer for the logged-in owner)",
+            },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["total_slides"],
+                  properties: {
+                    total_slides: {
+                      type: "integer",
+                      description: "The republished PDF's page count, as read by the client",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "OK",
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    properties: {
+                      ok: { type: "boolean" },
+                      totalSlides: { type: "integer" },
+                      filename: { type: "string" },
+                    },
+                  },
+                },
+              },
+            },
+            "400": {
+              description: "Missing or invalid total_slides, or the presentation is not URL-backed",
+            },
+            "403": { description: "Wrong controller token" },
+            "404": { description: "Unknown or expired session id" },
+          },
+        },
+      },
+      "/api/sessions/{id}": {
+        delete: {
+          summary: "End a presentation",
+          description:
+            "Disconnects all viewers, removes the PDF, and marks the session expired — not recoverable. Authorized by the presentation's controller token.",
+          operationId: "endSession",
+          parameters: [
+            { name: "id", in: "path", required: true, schema: { type: "string" } },
+            {
+              name: "x-controller-token",
+              in: "header",
+              required: true,
+              schema: { type: "string" },
+            },
+          ],
+          responses: {
+            "200": {
+              description: "OK",
+              content: {
+                "application/json": {
+                  schema: { type: "object", properties: { ok: { type: "boolean" } } },
+                },
+              },
+            },
+            "403": { description: "Wrong controller token" },
+            "404": { description: "Unknown session id" },
+          },
+        },
+      },
     },
   };
 }
