@@ -6,12 +6,14 @@ import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AccountControl } from "@/components/AccountControl";
 import { PresioLogo } from "@/components/PresioLogo";
+import { GitHubIcon } from "@/components/GitHubIcon";
 import { MobileNotice } from "@/components/MobileNotice";
 import { CodeBlock } from "@/components/CodeBlock";
 import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
 import { ConfirmReuploadDialog } from "@/components/controller/ConfirmReuploadDialog";
 import { ConfirmEndDialog } from "@/components/controller/ConfirmEndDialog";
 import { idbPut, idbGet, idbList, idbDelete } from "@/lib/localStore";
+import { newLocalDeckId } from "@/lib/localId";
 import { isDeckWatchSupported, PDF_PICKER_OPTIONS } from "@/lib/deckWatcher";
 import { getSessionAuth, setSessionAuth, endSession } from "@/lib/utils";
 import { lsRemove, lsSetString, annotationsKey, sessionKey, deckWatchKey } from "@/lib/storage";
@@ -22,6 +24,7 @@ import { supabase } from "@/lib/supabaseClient";
 import { useAuth } from "@/lib/useAuth";
 import "@/lib/pdf"; // ensure pdf.js worker is configured
 
+const REPO_URL = "https://github.com/benedict-armstrong/presio";
 const TYPST_PACKAGE_URL = "https://github.com/benedict-armstrong/presio-typst-package";
 const LATEX_PACKAGE_URL = "https://github.com/benedict-armstrong/presio-latex-package";
 const OVERLEAF_EXAMPLE_URL =
@@ -275,6 +278,11 @@ interface ReuploadPrompt {
 }
 
 async function listControlledSynced(): Promise<RecentDeck[]> {
+  // Every probe below has to time out before the next one starts, so offline
+  // this scan turns a page that has all its local decks in hand into a page
+  // that sits there. The decks it finds are server-hosted and unreachable
+  // anyway, so skip it rather than wait it out.
+  if (!navigator.onLine) return [];
   const ids: string[] = [];
   try {
     for (let i = 0; i < localStorage.length; i++) {
@@ -317,6 +325,9 @@ async function listControlledSynced(): Promise<RecentDeck[]> {
 // zero extra network round-trips, so the fetch is skipped entirely when no
 // session token exists — signing out drops the list back to local-only for free.
 async function listAccountSynced(): Promise<RecentDeck[]> {
+  // Same reasoning as above, plus getSession() itself auto-refreshes a
+  // near-expiry token — a network round trip before the fetch even starts.
+  if (!navigator.onLine) return [];
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
   if (!token) return [];
@@ -619,7 +630,12 @@ export default function Home() {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // The plain create path: mint a session, store the deck locally, open share.
+  // The plain create path: store the deck locally under an id minted here, and
+  // open share. Nothing on this path touches the network — the deck's bytes,
+  // its id and everything keyed by it are local to this browser, so a PDF can
+  // be imported and presented with no connection at all. The join code (and the
+  // `sessions` row behind it) is created later, server-side, if and when the
+  // presenter shares the deck.
   const createDeck = useCallback(
     async (p: {
       file: File;
@@ -629,17 +645,7 @@ export default function Home() {
       totalSlides: number;
       handle?: FileSystemFileHandle;
     }) => {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      const { data: sessionData } = await supabase.auth.getSession();
-      if (sessionData.session) headers.Authorization = `Bearer ${sessionData.session.access_token}`;
-      const res = await fetch("/api/sessions/local", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ filename: p.filename, total_slides: p.totalSlides }),
-      });
-      if (!res.ok) throw new Error("Failed to create session");
-      const { id, controllerToken, passphrase } = await res.json();
-      if (controllerToken) setSessionAuth(id, { controllerToken, passphrase });
+      const id = newLocalDeckId();
       try {
         await idbPut({
           id,
@@ -903,12 +909,16 @@ export default function Home() {
           <span className="font-mono text-base font-semibold tracking-tight">Presio</span>
         </div>
         <div className="flex items-center gap-5">
-          <Link
-            to="/about"
-            className="hidden text-sm text-muted-foreground transition-colors hover:text-foreground sm:inline"
+          <a
+            href={REPO_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Presio on GitHub"
+            aria-label="Presio on GitHub"
+            className="hidden text-muted-foreground transition-colors hover:text-foreground sm:inline-flex"
           >
-            About
-          </Link>
+            <GitHubIcon />
+          </a>
           <AccountControl />
           <ThemeToggle />
         </div>
@@ -1347,9 +1357,16 @@ Hello world.
         <ScrollReveal className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 text-xs text-muted-foreground sm:flex-row">
           <span>© Presio — built for presenting PDFs</span>
           <div className="flex gap-4">
-            <Link to="/about" className="hover:text-foreground">
-              About
-            </Link>
+            <a
+              href={REPO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Presio on GitHub"
+              aria-label="Presio on GitHub"
+              className="inline-flex items-center hover:text-foreground"
+            >
+              <GitHubIcon className="h-3.5 w-3.5" />
+            </a>
             <Link to="/check" className="hover:text-foreground">
               presio.xyz/check
             </Link>
