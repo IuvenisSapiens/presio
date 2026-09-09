@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn, getSessionAuth, setSessionAuth } from "@/lib/utils";
-import { Settings, Check, Option, Plus, Share2, ExternalLink, QrCode, Save, FolderOpen, PenLine, RefreshCw } from "lucide-react";
+import { Settings, Check, Option, Plus, Share2, ExternalLink, QrCode, Save, FolderOpen, PenLine } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { Separator } from "@/components/ui/separator";
@@ -14,6 +14,7 @@ import { ControllerOnboarding } from "@/components/ControllerOnboarding";
 import { NewsletterDialog } from "@/components/NewsletterDialog";
 import { InstallPrompt } from "@/components/InstallPrompt";
 import { useNewsletterPrompt } from "@/lib/useNewsletterPrompt";
+import { useAppVersion } from "@/lib/useAppVersion";
 import { DownloadButton } from "@/components/DownloadButton";
 import { hasCompletedControllerOnboarding } from "@/lib/onboarding";
 import { useAuth } from "@/lib/useAuth";
@@ -285,6 +286,11 @@ export function ControllerView({
   // One-time email list prompt after a few minutes of presenting. Waits for
   // the first-run tutorial to be out of the way.
   const newsletter = useNewsletterPrompt(!onboardingOpen);
+
+  // Which build is serving this, for the settings footer. Only asked for once
+  // the sheet is open, and null (rendering nothing) whenever there's no
+  // versioned server to ask.
+  const appVersion = useAppVersion(settingsOpen);
 
   // Sharing a deck that only ever lived in this browser creates its session
   // row server-side, and that is where its join code is minted — so the deck
@@ -750,28 +756,6 @@ export function ControllerView({
           <Separator />
 
           <section className="space-y-2">
-            <h3 className="text-sm font-medium">Presentation</h3>
-            <p className="text-xs text-muted-foreground">
-              Swap in a recompiled PDF. The code, link and passphrase stay the
-              same; drawings are cleared and Presio-edited notes are lost.
-            </p>
-            <div>
-              <Button
-                size="sm"
-                variant="outline"
-                data-testid="deck-replace"
-                disabled={replacing}
-                onClick={openReplacePicker}
-              >
-                <RefreshCw size={14} className={cn("mr-1", replacing && "animate-spin")} />
-                {replacing ? "Replacing…" : "Replace PDF…"}
-              </Button>
-            </div>
-          </section>
-
-          <Separator />
-
-          <section className="space-y-2">
             <h3 className="text-sm font-medium">Drawing</h3>
             <p className="text-xs text-muted-foreground">
               Save the drawings made on the slides to a file, or load a previously saved drawing.
@@ -862,6 +846,12 @@ export function ControllerView({
           <Button className="w-full" variant="ghost" onClick={() => setSettingsOpen(false)}>
             Close
           </Button>
+
+          {appVersion && (
+            <p className="text-center text-xs font-mono text-muted-foreground" data-testid="app-version">
+              {appVersion}
+            </p>
+          )}
         </DialogOverlay>
       )}
 
