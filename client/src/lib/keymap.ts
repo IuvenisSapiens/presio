@@ -14,9 +14,10 @@ export interface Keymap {
   lastSlide: KeyBinding[];
   toggleBlank: KeyBinding[];
   toggleCode: KeyBinding[];
+  jumpToSlide: KeyBinding[];
 }
 
-export const KEYMAP_ACTIONS = ["nextSlide", "prevSlide", "firstSlide", "lastSlide", "toggleBlank", "toggleCode"] as const;
+export const KEYMAP_ACTIONS = ["nextSlide", "prevSlide", "firstSlide", "lastSlide", "toggleBlank", "toggleCode", "jumpToSlide"] as const;
 export type KeymapAction = (typeof KEYMAP_ACTIONS)[number];
 
 export const KEYMAP_LABELS: Record<KeymapAction, string> = {
@@ -26,6 +27,7 @@ export const KEYMAP_LABELS: Record<KeymapAction, string> = {
   lastSlide: "Last slide",
   toggleBlank: "Blank screen",
   toggleCode: "Show join code",
+  jumpToSlide: "Jump to slide (then digits)",
 };
 
 export const DEFAULT_KEYMAP: Keymap = {
@@ -36,6 +38,8 @@ export const DEFAULT_KEYMAP: Keymap = {
   lastSlide: [{ key: "ArrowRight", meta: true }],
   toggleBlank: [{ key: "b" }],
   toggleCode: [{ key: "c" }],
+  // A prefix, not a one-shot action: it arms digit capture (see ControllerView).
+  jumpToSlide: [{ key: "j" }],
 };
 
 export function loadKeymap(): Keymap {

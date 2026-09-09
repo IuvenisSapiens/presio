@@ -28,7 +28,7 @@ import { ThumbnailsCard } from "@/components/controller/ThumbnailsCard";
 import { TimerCard, TimerAction, TimerSettingsDialog, MobileTimer, type TimerSettings } from "@/components/controller/TimerCard";
 import { ShortcutsEditor } from "@/components/controller/ShortcutsEditor";
 import { ControllerHeader } from "@/components/controller/ControllerHeader";
-import { ControllerNav } from "@/components/controller/ControllerNav";
+import { ControllerNav, SlideCounter } from "@/components/controller/ControllerNav";
 import { ControllerMenu } from "@/components/controller/ControllerMenu";
 import { ControllerDashboard, type CardEntry } from "@/components/controller/ControllerDashboard";
 import { ControllerStack } from "@/components/controller/ControllerStack";
@@ -69,6 +69,11 @@ import { type MosaicNode } from "react-mosaic-component";
 import type { MediaState, AudioState } from "@/components/MediaOverlay";
 import type { Deck } from "@/lib/deck";
 import { DEFAULT_PEN_STYLE, DEFAULT_HIGHLIGHTER_STYLE, hasAnyStrokes, type LaserPoint, type PenStyle, type Stroke, type Tool } from "@/lib/annotations";
+
+// How long a pending "j<number>" jump waits for another digit before it
+// commits on its own. Long enough to type a second digit, short enough that the
+// presenter isn't left staring at a half-typed number.
+const JUMP_IDLE_MS = 1200;
 
 // --- Component ---
 
@@ -332,6 +337,40 @@ export function ControllerView({
   // A card is shown iff it's a leaf in the tree; this drives the Settings checkboxes.
   const visible = new Set(visibleKeys(mosaic));
 
+  // "j52" style jumps: the jumpToSlide binding arms digit capture, digits
+  // accumulate, and Enter or a short pause commits. The pending digits live in
+  // state so the footer counter can show them — a mode that silently swallows
+  // keystrokes is worse than no mode at all.
+  const [pendingJump, setPendingJump] = useState<string | null>(null);
+  const jumpTimer = useRef<number | null>(null);
+
+  const cancelJump = useCallback(() => {
+    if (jumpTimer.current !== null) clearTimeout(jumpTimer.current);
+    jumpTimer.current = null;
+    setPendingJump(null);
+  }, []);
+
+  const commitJump = useCallback((digits: string) => {
+    cancelJump();
+    const n = parseInt(digits, 10);
+    if (Number.isFinite(n)) onGoTo(Math.min(Math.max(n, 1), totalSlides));
+  }, [cancelJump, onGoTo, totalSlides]);
+
+  // Arm (or extend) digit capture. The idle timeout means "j5" alone still
+  // jumps, and a stray prefix key never leaves the mode armed forever.
+  const armJump = useCallback((digits: string) => {
+    if (jumpTimer.current !== null) clearTimeout(jumpTimer.current);
+    setPendingJump(digits);
+    jumpTimer.current = window.setTimeout(() => {
+      jumpTimer.current = null;
+      if (digits) commitJump(digits);
+      else cancelJump();
+    }, JUMP_IDLE_MS);
+  }, [commitJump, cancelJump]);
+
+  // Never leave a pending jump's timer running past unmount.
+  useEffect(() => cancelJump, [cancelJump]);
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -343,7 +382,22 @@ export function ControllerView({
       ) {
         return;
       }
-      if (matchesBinding(e, keymap.firstSlide)) {
+      // While armed, every keystroke belongs to the jump: digits accumulate,
+      // Enter commits, and anything else cancels rather than firing its own
+      // shortcut halfway through a page number.
+      if (pendingJump !== null) {
+        // A bare modifier press isn't a decision either way.
+        if (["Shift", "Control", "Alt", "Meta"].includes(e.key)) return;
+        e.preventDefault();
+        if (/^[0-9]$/.test(e.key)) armJump(pendingJump + e.key);
+        else if (e.key === "Enter") commitJump(pendingJump);
+        else cancelJump();
+        return;
+      }
+      if (matchesBinding(e, keymap.jumpToSlide)) {
+        e.preventDefault();
+        armJump("");
+      } else if (matchesBinding(e, keymap.firstSlide)) {
         e.preventDefault();
         onGoTo(1);
       } else if (matchesBinding(e, keymap.lastSlide)) {
@@ -365,7 +419,7 @@ export function ControllerView({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [currentSlide, totalSlides, onGoTo, onBlankToggle, onShowCodeToggle, local, keymap]);
+  }, [currentSlide, totalSlides, onGoTo, onBlankToggle, onShowCodeToggle, local, keymap, pendingJump, armJump, commitJump, cancelJump]);
 
   const onMosaicChange = useCallback((node: MosaicNode<string> | null) => {
     setMosaic(node);
@@ -635,9 +689,13 @@ export function ControllerView({
         <div className="border-t px-3 py-3 space-y-2">
           <div className="flex items-center justify-center gap-3">
             <MobileTimer id={id} settings={timerSettings} />
-            <p className="text-center text-xs text-muted-foreground tabular-nums">
-              {currentSlide} / {totalSlides}
-            </p>
+            <SlideCounter
+              className="text-xs text-muted-foreground"
+              currentSlide={currentSlide}
+              totalSlides={totalSlides}
+              onGoTo={onGoTo}
+              pendingJump={pendingJump}
+            />
             {!local && (
               <Button variant="ghost" size="sm" onClick={onSyncAll}>
                 Sync All
@@ -660,6 +718,7 @@ export function ControllerView({
             currentSlide={currentSlide}
             totalSlides={totalSlides}
             onGoTo={onGoTo}
+            pendingJump={pendingJump}
           />
           {!local && (
             <Button variant="ghost" size="sm" onClick={onSyncAll} title="Bring all viewers back to the current slide">
