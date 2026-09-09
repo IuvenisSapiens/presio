@@ -1,0 +1,107 @@
+name: Package versions
+
+# The docs pin an exact version of the Typst package
+# (`#import "@preview/presio:X.Y.Z"`), and hand-editing those literals is how
+# the homepage and the example deck drifted apart in the first place. This
+# checks weekly what is actually published and opens a PR when the pinned
+# version — client/src/lib/packageVersions.ts — is behind.
+#
+# Typst Universe is the authority here, not the tags on presio-typst-package:
+# an `@preview` import only resolves once the release has been published to
+# Universe, so bumping to a freshly tagged version would break every snippet
+# users copy. A tag Universe has not caught up with is reported in the run
+# summary instead of being pinned.
+
+on:
+  schedule:
+    # Mondays, early UTC. Monthly like dependabot is too slow for a version
+    # users copy-paste; anything more often is noise for a two-package check.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: check
+        name: Compare the pinned version with Typst Universe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pinned=$(grep -oP 'TYPST_PACKAGE_VERSION = "\K[^"]+' client/src/lib/packageVersions.ts)
+          latest=$(curl -fsSL https://packages.typst.org/preview/index.json \
+            | jq -r '[.[] | select(.name == "presio") | .version]
+                     | sort_by(split(".") | map(tonumber)) | last')
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "Pinned $pinned, Typst Universe has $latest" >> "$GITHUB_STEP_SUMMARY"
+
+          # `sort -V` decides direction, so a pin that is *ahead* of Universe
+          # (someone bumped by hand before the release landed) is left alone
+          # rather than being silently walked backwards.
+          behind=false
+          if [ "$pinned" != "$latest" ] \
+            && [ "$(printf '%s\n%s\n' "$pinned" "$latest" | sort -V | tail -1)" = "$latest" ]; then
+            behind=true
+          fi
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+
+          # A tag with no Universe release yet is normal for a day or two after
+          # a release, so it is a note in the summary, not a failure.
+          tag=$(gh api repos/benedict-armstrong/presio-typst-package/tags \
+            --jq '[.[].name | ltrimstr("v") | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))]
+                  | sort_by(split(".") | map(tonumber)) | last // ""')
+          if [ -n "$tag" ] && [ "$tag" != "$latest" ] \
+            && [ "$(printf '%s\n%s\n' "$latest" "$tag" | sort -V | tail -1)" = "$tag" ]; then
+            echo "presio-typst-package is tagged v$tag, which is not on Typst Universe yet — not pinning it." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # The LaTeX package is installed by copying presio.sty, so nothing in
+          # this repo pins a version for it. Say so if it ever starts releasing.
+          latex=$(gh api repos/benedict-armstrong/presio-latex-package/tags \
+            --jq '[.[].name | ltrimstr("v") | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | length')
+          if [ "$latex" != "0" ]; then
+            echo "::warning::presio-latex-package now publishes versioned tags — the docs still install it unversioned and may need to pin one."
+          fi
+
+      - name: Bump the pinned version
+        if: steps.check.outputs.behind == 'true'
+        env:
+          PINNED: ${{ steps.check.outputs.pinned }}
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          set -euo pipefail
+          sed -i "s/TYPST_PACKAGE_VERSION = \"$PINNED\"/TYPST_PACKAGE_VERSION = \"$LATEST\"/" \
+            client/src/lib/packageVersions.ts
+          # README.md and example/example.typ are not built from TypeScript, so
+          # they carry the literal themselves and move with the constant.
+          sed -i "s|@preview/presio:$PINNED|@preview/presio:$LATEST|g" README.md example/example.typ
+
+      - name: Open the bump PR
+        if: steps.check.outputs.behind == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          # Falls back to the default token, but then the PR gets no CI run:
+          # GITHUB_TOKEN pushes do not trigger other workflows (see the same
+          # note in release-please.yml).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          branch: chore/typst-package-version
+          # One standing branch, so a bump that goes unmerged is updated in
+          # place instead of stacking a new PR every week.
+          commit-message: "chore: pin Typst package ${{ steps.check.outputs.latest }}"
+          title: "chore: pin Typst package ${{ steps.check.outputs.latest }}"
+          body: |
+            `@preview/presio:${{ steps.check.outputs.latest }}` is published on
+            Typst Universe; the docs pinned
+            `${{ steps.check.outputs.pinned }}`.
+
+            Opened by `.github/workflows/package-versions.yml`.

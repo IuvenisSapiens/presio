@@ -1,5 +1,5 @@
 import { Suspense, lazy } from "react";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { ThemeProvider } from "@/lib/theme";
 import { AuthProvider } from "@/lib/auth";
 import { PasswordRecoveryDialog } from "@/components/PasswordRecoveryDialog";
@@ -23,6 +23,13 @@ export default function App() {
             <Route path="/s/:id" element={<Presentation />} />
             <Route path="/s/:id/share" element={<Share />} />
             <Route path="/check" element={<Suspense fallback={null}><CheckerPage /></Suspense>} />
+            {/* Anything else is a stale or mistyped URL — send it home rather
+                than render a blank page. Last so it can only ever match what
+                the routes above didn't, and harmless to the paths the server
+                answers itself (/llms.txt, /api.md, …): those never reach the
+                SPA, since the server resolves them before the index.html
+                fallback. `replace` keeps the dead URL out of the history. */}
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
           <PasswordRecoveryDialog />
         </BrowserRouter>

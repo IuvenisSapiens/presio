@@ -19,6 +19,7 @@ import { getSessionAuth, setSessionAuth, endSession } from "@/lib/utils";
 import { lsRemove, lsSetString, annotationsKey, sessionKey, deckWatchKey } from "@/lib/storage";
 import { track, sha256Hex } from "@/lib/analytics";
 import { matchReupload } from "@/lib/reupload";
+import { TYPST_PACKAGE_VERSION } from "@/lib/packageVersions";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
 import { supabase } from "@/lib/supabaseClient";
 import { useAuth } from "@/lib/useAuth";
@@ -1268,7 +1269,7 @@ export default function Home() {
                 slides. Works with plain Typst, Polylux, or Touying.
               </p>
               <CodeBlock
-                code={`#import "@preview/presio:0.2.2": media, speaker-notes
+                code={`#import "@preview/presio:${TYPST_PACKAGE_VERSION}": media, speaker-notes
 
 = Introduction
 

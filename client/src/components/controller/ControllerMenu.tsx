@@ -81,7 +81,7 @@ export function ControllerMenu({
               <Button variant="ghost" className="justify-start" onClick={act(onSwitchToViewer)}>
                 Switch to Viewer
               </Button>
-              <Button variant="ghost" className="justify-start" onClick={act(onReplaceClick)}>
+              <Button variant="ghost" className="justify-start" data-testid="deck-replace" onClick={act(onReplaceClick)}>
                 <RefreshCw size={16} className="mr-2" />
                 Replace PDF…
               </Button>
