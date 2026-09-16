@@ -7,10 +7,11 @@
     "build": "cd client && npm install && npm run build && cd ../server && npm install",
     "start": "cd server && npm start",
     "start:local": "cd server && cross-env PRESIO_MODE=local npm start",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "record:demo": "tsx scripts/record-demo.mts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
+    "@playwright/test": "^1.63.0",
     "cross-env": "^10.1.0",
     "tsx": "^4.23.13"
   },

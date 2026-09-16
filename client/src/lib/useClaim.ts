@@ -34,7 +34,6 @@ export function useClaim(id: string) {
       // dev-only VITE_DEV_USER flag fakes a user but never establishes a session,
       // and the server's claim endpoint requires a real access token. Surface that
       // instead of silently doing nothing when the button is clicked.
-      return true;
       setSyncError("You're not fully signed in. Please log in again to sync.");
       return null;
     }
