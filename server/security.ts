@@ -27,7 +27,14 @@ export function buildCspDirectives() {
   return {
     ...helmet.contentSecurityPolicy.getDefaultDirectives(),
     "default-src": ["'self'"],
-    "script-src": ["'self'", "https://www.youtube.com", "https://www.youtube-nocookie.com", "https://player.vimeo.com", ...(analyticsHost ? [analyticsHost] : [])],
+    // 'wasm-unsafe-eval' is required for the code samples' syntax highlighting:
+    // Shiki's Oniguruma regex engine is WebAssembly, and under a script-src
+    // without it the browser refuses to compile the module. The failure is
+    // silent by design (CodeBlock falls back to an unhighlighted <pre>) and
+    // invisible in dev, where Vite serves the page without this CSP — so it
+    // only ever shows up on a deployed origin. It permits WebAssembly
+    // compilation, not JavaScript eval(): 'unsafe-eval' is still not granted.
+    "script-src": ["'self'", "'wasm-unsafe-eval'", "https://www.youtube.com", "https://www.youtube-nocookie.com", "https://player.vimeo.com", ...(analyticsHost ? [analyticsHost] : [])],
     "frame-src": ["'self'", "https://www.youtube.com", "https://www.youtube-nocookie.com", "https://player.vimeo.com"],
     "img-src": ["'self'", "data:", "blob:", "https:"],
     "media-src": ["'self'", "blob:", "https:"],
