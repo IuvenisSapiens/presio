@@ -5,14 +5,7 @@ Present PDFs from your browser — try it at **[presio.ch](https://presio.ch)** 
 
 Upload a PDF presentation, get a short link, and control the slideshow from one browser window while viewers watch in another. Presio is a hosted service; this repository is its source code.
 
-> **Two addresses, same app.** Some networks (schools, CERN and others) block
-> the whole `.xyz` top-level domain, so Presio also answers on `presio.ch`. Use
-> whichever one reaches you.
->
-> They do *not* share browser storage. Presio is local by default — your decks,
-> recents list, controller layout and login all live in one origin's storage —
-> so a deck imported on one address will not appear on the other, and each
-> installs as its own PWA. Pick one and stay on it.
+> If `.xyz` domains are blocked by your institution you can use **[presio.ch](https://presio.ch)**
 
 
 ![Demo](https://github.com/benedict-armstrong/presio/releases/download/demo/presio.gif)
