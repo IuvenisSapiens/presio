@@ -98,7 +98,11 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.supabase.rule=Host(`${SUPABASE_HOST}`)"
+      # SUPABASE_HOST_ALT keeps the previous API hostname routed after a domain
+      # move, so a cached service worker or an installed PWA still calling the
+      # old host keeps working instead of hard-failing. Optional, same defaulting
+      # as the app router above.
+      - "traefik.http.routers.supabase.rule=Host(`${SUPABASE_HOST}`) || Host(`${SUPABASE_HOST_ALT:-${SUPABASE_HOST}}`)"
       - "traefik.http.routers.supabase.entrypoints=websecure"
       - "traefik.http.routers.supabase.tls=true"
       - "traefik.http.services.supabase.loadbalancer.server.port=8000"
@@ -684,6 +688,13 @@ services:
         VITE_SUPABASE_URL: ${SUPABASE_PUBLIC_URL}
         VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY: ${ANON_KEY}
         VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-}
+        # The deploying commit or tag, so /healthz answers "which build is
+        # this?" — the one question you actually want answered when a deploy
+        # looks wrong. Without it the image keeps the Dockerfile default
+        # ("dev") and a half-applied deploy is indistinguishable from a good
+        # one. Pass it on the command line:
+        #   APP_VERSION=$(git describe --tags --always) docker compose up -d --build
+        APP_VERSION: ${APP_VERSION:-dev}
     restart: unless-stopped
     networks:
       default:
@@ -698,11 +709,18 @@ services:
       SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
       PORT: 3001
       ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:-}
-      # Origin used for generated links (canonical/og:url tags, /api/present
-      # handoff URLs, OpenAPI self-references). Pinned to the configured domain
-      # so a spoofed Host header can't poison them; without it the server falls
-      # back to the request's own Host, which the client controls.
-      PUBLIC_BASE_URL: https://${APP_HOST}
+      # Origins used for generated links (canonical/og:url tags, /api/present
+      # handoff URLs, OpenAPI self-references). Pinned to the configured
+      # domains so a spoofed Host header can't poison them; without it the
+      # server falls back to the request's own Host, which the client controls.
+      #
+      # Comma-separated, in priority order. A share or handoff link follows
+      # whichever listed domain the visitor actually used, so someone on the
+      # second domain gets a link they can open; canonical/og:url and the
+      # OpenAPI and schema self-references always name the FIRST entry, so the
+      # two domains don't present as duplicate content. Defaults to the single
+      # app domain, which is the single-domain behaviour as before.
+      PUBLIC_BASE_URLS: ${PUBLIC_BASE_URLS:-https://${APP_HOST}}
       ANALYTICS_URL: ${ANALYTICS_URL:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
       SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
@@ -711,7 +729,15 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.presio.rule=Host(`${APP_HOST}`)"
+      # Two Host() matchers OR'd together — NOT Host(`a`, `b`). The multi-value
+      # form is Traefik v2 syntax; v3 rejects it ("unexpected number of
+      # parameters; got 2, expected one of [1]") and disables the whole router,
+      # which would take the app offline rather than fail visibly at deploy.
+      #
+      # APP_HOST_ALT is optional: unset, it defaults back to APP_HOST, leaving a
+      # harmless `Host(x) || Host(x)` rather than an empty Host(``) matching
+      # nothing. Verified enabled on Traefik 3.3 both ways.
+      - "traefik.http.routers.presio.rule=Host(`${APP_HOST}`) || Host(`${APP_HOST_ALT:-${APP_HOST}}`)"
       - "traefik.http.routers.presio.entrypoints=websecure"
       - "traefik.http.routers.presio.tls=true"
       - "traefik.http.services.presio.loadbalancer.server.port=3001"
@@ -740,6 +766,13 @@ services:
   # After first boot: visit https://${UMAMI_HOST}, log in (admin / umami),
   # change the password, add a website, then paste the tracking script into
   # client/index.html using the generated website ID.
+  #
+  # UMAMI_HOST_ALT keeps a previous analytics hostname routed after a move.
+  # This one is not cosmetic: the tracking script beacons back to the origin it
+  # was loaded FROM, and the built client is precached by the service worker —
+  # so a visitor still running a pre-move bundle keeps calling the old host for
+  # as long as that cache lives. Without the second matcher those hits are
+  # silently dropped rather than recorded.
   umami:
     container_name: presio-umami
     image: ghcr.io/umami-software/umami:postgresql-latest
@@ -756,7 +789,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.umami.rule=Host(`${UMAMI_HOST}`)"
+      - "traefik.http.routers.umami.rule=Host(`${UMAMI_HOST}`) || Host(`${UMAMI_HOST_ALT:-${UMAMI_HOST}}`)"
       - "traefik.http.routers.umami.entrypoints=websecure"
       - "traefik.http.routers.umami.tls=true"
       - "traefik.http.services.umami.loadbalancer.server.port=3000"
@@ -764,6 +797,10 @@ services:
   # Uptime Kuma — self-hosted uptime monitoring + status dashboard.
   # After first boot: visit https://${UPTIME_HOST}, create the admin account,
   # then add an HTTP(s) monitor pointing at https://${APP_HOST}/healthz.
+  #
+  # UPTIME_HOST_ALT keeps a previous dashboard hostname routed after a move, so
+  # bookmarks and any external status link keep resolving. Same optional
+  # defaulting as the routers above.
   uptime-kuma:
     container_name: presio-uptime-kuma
     image: louislam/uptime-kuma:1
@@ -776,7 +813,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.uptime.rule=Host(`${UPTIME_HOST}`)"
+      - "traefik.http.routers.uptime.rule=Host(`${UPTIME_HOST}`) || Host(`${UPTIME_HOST_ALT:-${UPTIME_HOST}}`)"
       - "traefik.http.routers.uptime.entrypoints=websecure"
       - "traefik.http.routers.uptime.tls=true"
       - "traefik.http.services.uptime.loadbalancer.server.port=3001"

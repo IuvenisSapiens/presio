@@ -1,8 +1,11 @@
 # Presio
 
-Present PDFs from your browser — try it at **[presio.xyz](https://presio.xyz)**.
+Present PDFs from your browser — try it at **[presio.ch](https://presio.ch)** or
+**[presio.xyz](https://presio.xyz)**.
 
 Upload a PDF presentation, get a short link, and control the slideshow from one browser window while viewers watch in another. Presio is a hosted service; this repository is its source code.
+
+> If `.xyz` domains are blocked by your institution you can use **[presio.ch](https://presio.ch)**
 
 
 ![Demo](https://github.com/benedict-armstrong/presio/releases/download/demo/presio.gif)
@@ -110,7 +113,7 @@ LaTeX — use `hyperref` to create an invisible `note:` link:
 \speakernote{Remember to mention the demo.}
 ```
 
-Validate what you produced at [presio.xyz/check](https://presio.xyz/check) — it
+Validate what you produced at [presio.ch/check](https://presio.ch/check) — it
 shows per-page thumbnails and reports whether the notes and media sidecars are
 valid.
 

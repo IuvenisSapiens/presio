@@ -72,6 +72,13 @@ Set the domains to your **real, externally-resolvable** values:
 
 - `APP_HOST` / `SUPABASE_HOST` → bare hostnames, e.g. `presio.xyz` /
   `supabase.presio.xyz` (these drive Traefik's `Host()` routing rules).
+- `APP_HOST_ALT` / `SUPABASE_HOST_ALT` → optional second hostnames; leave empty
+  for a single domain. See [Serving the app on two
+  domains](#serving-the-app-on-two-domains).
+- `PUBLIC_BASE_URLS` → comma-separated public origins, in priority order.
+  Share and handoff links follow whichever listed domain the visitor used;
+  canonical/og:url and the OpenAPI and schema self-references always name the
+  first. Defaults to `https://${APP_HOST}`.
 - `SITE_URL` → `https://presio.xyz`
 - `SUPABASE_PUBLIC_URL` / `API_EXTERNAL_URL` → `https://supabase.presio.xyz`
 
@@ -108,9 +115,13 @@ only do this once — every app (including Presio) attaches to the `web` network
 From the **repo root**:
 
 ```bash
-docker compose up -d --build
+APP_VERSION=$(git describe --tags --always) docker compose up -d --build
 docker compose ps                # everything healthy / completed
 ```
+
+`APP_VERSION` is optional but worth passing: it is what `/healthz` reports back,
+so you can confirm the build you meant to deploy is the one running. Left unset
+it is `dev`, and a half-applied deploy looks exactly like a good one.
 
 First boot runs the Supabase migrations, creates the MinIO bucket, then
 `presio-db-init` applies `dbschema.sql`, then `presio` starts. As soon as DNS
@@ -138,6 +149,75 @@ would not change that — the visitor's real address survives only in
 `Cf-Connecting-Ip`. `trust proxy` is kept for `req.protocol`, which `baseUrl()`
 needs so generated links come out `https://`.
 
+### Serving the app on two domains
+
+Every public router takes an optional second hostname via an `_ALT` variable —
+`APP_HOST_ALT`, `SUPABASE_HOST_ALT`, `UMAMI_HOST_ALT`, `UPTIME_HOST_ALT`. What
+each one is *for* differs, and the table below spells that out.
+
+The rule is two matchers OR'd together, **not** ``Host(`a`, `b`)`` — the
+multi-value form is Traefik v2 syntax. Traefik v3 rejects it with *"unexpected
+number of parameters; got 2, expected one of [1]"* and **disables the router**,
+which takes the app offline rather than failing visibly at deploy time:
+
+```
+traefik.http.routers.presio.rule=Host(`${APP_HOST}`) || Host(`${APP_HOST_ALT:-${APP_HOST}}`)
+```
+
+Only the *app* is genuinely served from two domains at once. `VITE_SUPABASE_URL`
+is baked into the client bundle at build time, `API_EXTERNAL_URL` is what GoTrue
+builds OAuth redirects and email links from, and an OAuth app has one callback
+URL — so the API, auth and storage have a single canonical domain. Put it on
+whichever domain is reachable from the most restricted network you care about.
+
+Every router nevertheless takes an `_ALT` hostname, because a *move* is not the
+same thing as being dual-homed: the second matcher keeps the **previous**
+hostname answering while clients still hold it.
+
+| Router | Primary | Second matcher | What the second one is for |
+| --- | --- | --- | --- |
+| app | `APP_HOST` | `APP_HOST_ALT` | genuinely serving both domains |
+| Supabase (Kong) | `SUPABASE_HOST` | `SUPABASE_HOST_ALT` | a cached service worker or installed PWA still calling the old API host |
+| Umami | `UMAMI_HOST` | `UMAMI_HOST_ALT` | the tracking script beacons back to the origin it was loaded from |
+| Uptime Kuma | `UPTIME_HOST` | `UPTIME_HOST_ALT` | bookmarks and external status links |
+
+All four default back to their primary when the `_ALT` is empty, so a
+single-domain deployment needs no change.
+
+The analytics one is the easy one to get wrong. `ANALYTICS_URL` has to name the
+same host `client/index.html` loads the tracking script from — the CSP
+`script-src` is derived from it, so a mismatch blocks analytics with no error
+anyone will notice. And because the built client is service-worker precached,
+moving `UMAMI_HOST` without setting `UMAMI_HOST_ALT` silently drops the hits
+from every visitor still running a pre-move bundle, for as long as that cache
+lives.
+
+Because `VITE_SUPABASE_URL` is a **build arg**, changing it needs
+`docker compose up -d --build`. A plain restart keeps the old bundle.
+
+#### `www.` is handled at the edge, not here
+
+The app router deliberately matches the apex only. `www.` is not added to the
+`Host()` rule — that would serve the same app under four names and put the
+duplicate-content problem back. Each zone instead carries a Cloudflare
+dynamic-redirect rule in the `http_request_dynamic_redirect` phase:
+
+```
+expression: http.host eq "www.presio.ch"
+action:     redirect, 301, preserve_query_string
+target:     concat("https://presio.ch", http.request.uri.path)
+```
+
+One per zone, each pointing at **its own** apex — `www.presio.xyz` goes to
+`presio.xyz`, not to the canonical `presio.ch`. Sending it across would drop the
+visitor on a different origin, and the two domains share no browser storage, so
+their local decks, recents list, controller layout and auth session would all
+appear to have vanished. Canonical tags are what consolidate the two domains for
+search engines; redirects are not the tool for it.
+
+Note this is per zone, like the rate-limit rules below: a domain added later
+without its own rule simply has no `www` redirect.
+
 Both Traefik entrypoints refuse any source outside Cloudflare's published
 ranges (`proxy/certs/dynamic/cfonly.yml`, applied as an entrypoint-default
 middleware so every router is covered), and the host firewall is configured to
@@ -156,6 +236,11 @@ as `Cf-Connecting-Ip`, which is forgeable by anyone able to reach the origin
 directly. presio.xyz limits at the Cloudflare edge and refuses non-Cloudflare
 traffic at the origin. If you self-host without a CDN in front, add a limit on
 your own proxy — Traefik's own `ratelimit` middleware is enough.
+
+Cloudflare rate-limit rules are **per zone**. Serving the app from two domains
+means two zones and therefore two independent buckets: a client gets the full
+allowance on each, so the effective ceiling is doubled. Recreate the rules on
+every zone — a domain without them is the soft way in to the same origin.
 
 Independent of this, `join_session` over Socket.IO is throttled per connection
 in `server/socket.ts`, because its reply reveals whether a 6-character join code
@@ -250,12 +335,40 @@ same proxy:
    ```
 
 3. Point `app2.example.com` at the host and `docker compose up -d`. TLS is
-   served from the proxy's default certificate (a Cloudflare Origin CA cert
+   served from the proxy's **default** certificate (a Cloudflare Origin CA cert
    covering `presio.xyz` + `*.presio.xyz`), so keep the hostname one level
    deep under `presio.xyz` — that's what Cloudflare's edge certificate and
    the origin cert both cover. No per-host ACME involved: the host firewall
    only admits Cloudflare on 80/443, so Let's Encrypt validation can't reach
    the origin anyway.
+
+   For a hostname under a *different* domain, the default certificate won't
+   cover it. Add a second certificate rather than replacing the default —
+   Traefik picks per-handshake by SNI, so the existing domain is unaffected:
+
+   ```yaml
+   # proxy/certs/dynamic/presio-ch.yml
+   tls:
+     certificates:
+       - certFile: /certs/presio.ch.pem
+         keyFile: /certs/presio.ch.key
+   ```
+
+   Generate the key **on the host** and send only the CSR out for signing, so
+   the private key never travels:
+
+   ```bash
+   openssl req -new -newkey rsa:2048 -nodes \
+     -keyout presio.ch.key -out presio.ch.csr \
+     -subj "/CN=presio.ch" \
+     -addext "subjectAltName=DNS:presio.ch,DNS:*.presio.ch"
+   ```
+
+   Sign the CSR as a Cloudflare Origin CA certificate (dashboard, or
+   `POST /certificates` with `request_type=origin-rsa`), install the returned
+   cert next to the key, and set that zone's SSL mode to **Full (strict)** —
+   the API value is `strict`, not `full_strict`. Traefik's file provider picks
+   the new file up live; no restart.
 
 ## Continuous deployment (optional)
 

@@ -25,7 +25,13 @@ export function CodeBlock({ code, lang = "typst" }: CodeBlockProps) {
       .then((out) => {
         if (!cancelled) setHtml(out);
       })
-      .catch(() => { /* fall back to the plain <pre> below */ });
+      .catch((err) => {
+        // Falls back to the plain <pre> below, which looks close enough to the
+        // real thing that a total failure went unnoticed on deployed origins
+        // (the CSP blocked Shiki's WebAssembly engine). Degrade quietly for the
+        // user, but say so in the console.
+        console.warn("Syntax highlighting unavailable, showing plain code:", err);
+      });
     return () => { cancelled = true; };
   }, [code, lang]);
 

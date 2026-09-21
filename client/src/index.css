@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/* The app switches theme by toggling `.dark` on <html> (see public/theme.js),
+   but Tailwind v4's built-in `dark:` variant defaults to the
+   prefers-color-scheme media query. Left alone the two disagree: with the OS
+   in dark mode and the app toggled to light, every `dark:` utility still
+   fires on a light page. Bind the variant to the class instead. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -53,12 +60,12 @@
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.185 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.5 0 0);
+  --muted-foreground: oklch(0.44 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.185 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
+  --border: oklch(0.895 0 0);
+  --input: oklch(0.895 0 0);
   --ring: oklch(0.708 0 0);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
@@ -71,7 +78,7 @@
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.97 0 0);
   --sidebar-accent-foreground: oklch(0.185 0 0);
-  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-border: oklch(0.895 0 0);
   --sidebar-ring: oklch(0.708 0 0);
 }
 
@@ -109,16 +116,20 @@
   --sidebar-ring: oklch(0.439 0 0);
 }
 
-/* Scoped accent tokens for Home2 — the rest of the app stays pure
-   grayscale; this page borrows one warm accent for the redesign. */
+/* Scoped tokens for Home2. The accent is now the ordinary foreground colour,
+   so the home page is pure grayscale like the rest of the app. Kept as tokens
+   rather than removed: the call sites that use them are load-bearing (focus
+   rings, the progress bar, the checkbox) and still need *a* colour — they just
+   no longer get a different one. Reintroducing an accent means changing these
+   two values and nothing else. */
 .home2 {
-  --home2-accent: #c97a1f;
-  --home2-accent-soft: rgba(201, 122, 31, 0.12);
+  --home2-accent: var(--foreground);
+  --home2-accent-soft: rgba(21, 23, 26, 0.06);
   --home2-grid: rgba(21, 23, 26, 0.06);
 }
 .dark .home2 {
-  --home2-accent: #f2a93c;
-  --home2-accent-soft: rgba(242, 169, 60, 0.14);
+  --home2-accent: var(--foreground);
+  --home2-accent-soft: rgba(242, 241, 237, 0.06);
   --home2-grid: rgba(242, 241, 237, 0.06);
 }
 
