@@ -60,6 +60,12 @@ index.html
     `presio.ui.setInteractive(true)` or a list of page areas. Two fingers stay
     Presio's even then: once a second touch lands, both pinch and pan the
     slide (the plugin still sees them, and should drop what the first began).
+    `setInteractive("pen")` takes only a pen's and a mouse's input and leaves
+    every finger to Presio, to pan, pinch and turn the page: a stylus draws
+    while the hand moves the slide. The plugin still sees the touches (for its
+    own gestures), and a hand resting while the pen is down is ignored. A
+    finger that lands on the plugin's own controls (buttons, links, inputs,
+    anything marked `data-control`) stays the plugin's.
     Pair it with `presio.layers` so the same content shows, still, in
     thumbnails and the next-slide preview.
 - `slideSurface` — what the `slide` surface covers: `"page"` (the default),
@@ -98,7 +104,9 @@ index.html
   else tile). They never fire while the presenter types in a field, and
   Presio's own shortcuts win where keys overlap (arrows, Space, PgUp/PgDn,
   `b`, `c`, `j` then digits) — Settings marks such a key as taken. The
-  built-ins use `k` and `r` (media) and `p`, `h`, `l`, Esc and ⌘Z (drawing).
+  built-ins use `k` and `r` (media) and `p`, `h`, `l`, `e`, Esc, ⌘Z and ⌘Y
+  (drawing). `presio.shortcut(command)` gives the key the presenter has for
+  one ("E", "⌘Z", or null), to show in a tooltip.
 - `contributes.settings` — settings Presio shows under the plugin in
   **Settings → Plugins** and stores in the presenter's settings file as
   `<id>.<name>` (e.g. `hello.greeting`). Types: `boolean`, `number`
@@ -150,7 +158,8 @@ presio.session          // { id, local, joinUrl } — joinUrl is null for a loca
 presio.slide.current    // 1-based slide on this device
 presio.slide.total
 presio.slide.onChange(slide => {})         // → unsubscribe()
-presio.onContextChange(presio => {})       // session/role/theme changed
+presio.onContextChange(presio => {})       // session/role/theme or shortcuts changed
+presio.shortcut(command)                   // the presenter's key for a keybinding: "E", "⌘Z" or null
 
 presio.send(type, payload, { retain, volatile })  // message the plugin's other instances
 presio.onMessage(({ type, payload, from, sender }) => {})
@@ -180,7 +189,7 @@ presio.deck.save(bytes)     // presenter: → Promise; same pages, saved where t
 presio.deck.onChange(kind => {})  // the deck was swapped: "edit" (same pages, e.g. notes saved) or "replace"
 presio.deck.onExport(async (bytes, { mode }) => bytes)  // transform the PDF this device downloads
 presio.ui.setVisible(bool)  // viewer surface: show/hide the layer
-presio.ui.setInteractive(true | false | [{ x, y, w, h }])  // slide surface: take input (fractions of the surface)
+presio.ui.setInteractive(true | false | "pen" | [{ x, y, w, h }])  // slide surface: take input (fractions of the surface)
                                            // in areas, touches arrive forwarded: pointer events sent to the element
                                            // touched (setPointerCapture throws for them; wrap it), a tap as a click
 presio.ui.view              // slide surface: { x, y, w, h, scale } — the part of it on screen, and its zoom
