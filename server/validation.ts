@@ -34,6 +34,10 @@ export function isValidEmail(value: unknown): value is string {
 // presentation comes close.
 export const MAX_TOTAL_SLIDES = 3000;
 
+// Largest PDF the server accepts on an upload. The client mirrors this in
+// client/src/lib/limits.ts to disable Sync before an upload that would fail.
+export const MAX_PDF_BYTES = 50 * 1024 * 1024;
+
 export function isValidTotalSlides(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= MAX_TOTAL_SLIDES;
 }
@@ -54,7 +58,7 @@ export function isValidSlideNumber(slideNumber: unknown, total: unknown): boolea
 // published (where to load them — never the plugins themselves). These caps
 // bound what a controller or viewer can make it hold.
 
-const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const PLUGIN_TYPE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 // A plugin page's SHA-256, hex.
 const HASH_RE = /^[0-9a-f]{64}$/;
