@@ -94,6 +94,9 @@ interface Presio {
     onChange(cb: (slide: { current: number; total: number }) => void): Unsubscribe;
   };
   onContextChange(cb: (presio: Presio) => void): Unsubscribe;
+  /** The presenter's key for one of this plugin's keybindings' commands
+   *  ("E", "⌘Z"), or null when it has none; a change calls onContextChange. */
+  shortcut(command: string): string | null;
   /** retain: true for the session, "deck" until the deck is replaced; a
    *  retained null forgets the type. volatile: may be dropped, not queued. */
   send(type: string, payload?: unknown, opts?: { retain?: boolean | "deck"; volatile?: boolean }): void;
@@ -145,7 +148,7 @@ interface Presio {
   };
   readonly ui: {
     setVisible(visible: boolean): void;
-    setInteractive(value: boolean | { x: number; y: number; w: number; h: number }[]): void;
+    setInteractive(value: boolean | "pen" | { x: number; y: number; w: number; h: number }[]): void;
     setButton(id: string, state: { active?: boolean; label?: string; disabled?: boolean; menu?: PresioMenuEntry[] }): void;
     /** Slide surface: the part of it on screen (fractions of it) and its zoom. */
     readonly view: PresioView;

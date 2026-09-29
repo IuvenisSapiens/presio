@@ -4,7 +4,7 @@
 // baking the drawing into a downloaded PDF. It reads the same history as the
 // slide surface (see model.ts).
 
-import { clearOps, commitAll, drawnSlides, loadOps, openDrawing, parseFile, serializeFile, strokes, undoOps, type DrawingState, type Tool } from "./model";
+import { clearOps, commitAll, drawnSlides, loadOps, openDrawing, parseFile, redoOps, serializeFile, strokes, undoOps, type DrawingState, type Tool } from "./model";
 import { drawStrokes } from "./render";
 import { saveFile } from "../../src/lib/saveFile";
 
@@ -23,6 +23,19 @@ export function runBackground() {
 
   // --- Previews (presio.layers) ---
 
+  // Hidden drawings (the palette's eye) are hidden here too.
+  const isHidden = () => presio.settings.get("hidden") === true;
+  const showPreview = (slide: number) => {
+    const url = previews.get(slide);
+    presio.layers.set(slide, url && !isHidden() ? [{ x: 0, y: 0, w: 1, h: 1, image: url, fit: "cover" }] : []);
+  };
+  let hidden = isHidden();
+  presio.settings.onChange(() => {
+    if (isHidden() === hidden) return;
+    hidden = isHidden();
+    for (const slide of previews.keys()) showPreview(slide);
+  });
+
   const preview = async (slide: number) => {
     pending.delete(slide);
     const list = strokes(history.state, slide);
@@ -40,7 +53,7 @@ export function runBackground() {
       if (!blob || strokes(history.state, slide) !== list) return;
       const url = URL.createObjectURL(blob);
       previews.set(slide, url);
-      presio.layers.set(slide, [{ x: 0, y: 0, w: 1, h: 1, image: url, fit: "cover" }]);
+      showPreview(slide);
     }
     if (old) setTimeout(() => URL.revokeObjectURL(old), 1000);
   };
@@ -90,6 +103,15 @@ export function runBackground() {
   presio.onCommand("highlighter", () => setTool("highlighter"));
   presio.onCommand("laser", () => setTool("laser"));
   presio.onCommand("pointer", () => setTool("none"));
+  // The eraser and the lasso are advanced tools: asking for one shows them.
+  const setAdvancedTool = (tool: Tool) => {
+    if (presio.settings.get("advanced") !== true) void presio.settings.set("advanced", true);
+    setTool(tool);
+  };
+  presio.onCommand("eraser", () => setAdvancedTool("eraser"));
+  presio.onCommand("lasso", () => setAdvancedTool("lasso"));
+  presio.onCommand("redo", () => commitAll(history, redoOps(history, presio.slide.current)));
+  presio.onCommand("toggleDrawings", () => void presio.settings.set("hidden", presio.settings.get("hidden") !== true));
   presio.onCommand("undo", () => commitAll(history, undoOps(history, presio.slide.current)));
   presio.onCommand("clear", () => commitAll(history, clearOps(history.state, presio.slide.current)));
 
