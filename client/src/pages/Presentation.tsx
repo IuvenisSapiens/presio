@@ -1,20 +1,21 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams, useSearchParams, useNavigate, useLocation, Link } from "react-router-dom";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import { loadPdf, loadPdfData, freshPdfUrl, loadLatestPdf, renderPage, clearCache, openPdf, destroyPdf, preloadPdf } from "@/lib/pdf";
+import { loadPdf, loadPdfData, freshPdfUrl, loadLatestPdf, renderPageInto, clearCache, destroyPdf, preloadPdf } from "@/lib/pdf";
 import { makeDeck, loadDeckExtras, type DeckExtras } from "@/lib/deck";
 import { useRenderTargetSize } from "@/hooks/useRenderTargetSize";
 import { useElementRef } from "@/hooks/useElementRef";
 import { lsGetString, lsSetString, lsRemove, deckWatchKey, slideKey } from "@/lib/storage";
 import { socket } from "@/lib/socket";
 import { useLatestRef } from "@/hooks/useLatestRef";
+import { useSessionTransport } from "@/hooks/useSessionTransport";
 import { DeckLoadTimer } from "@/lib/deckLoadMetrics";
-import { startClockSync } from "@/lib/clock";
-import { supabase } from "@/lib/supabaseClient";
-import { authEnabled } from "@/lib/authMode";
-import { getSessionAuth, endSession } from "@/lib/utils";
+import { endSession } from "@/lib/utils";
 import { idbGet, idbPut, idbDelete } from "@/lib/localStore";
 import { isLocalDeckId } from "@/lib/localId";
+import { controllerHeaders } from "@/lib/sessionAuth";
+import { readPdfFile } from "@/lib/deckImport";
+import { watchRemoteDeck } from "@/lib/remoteDeckPoller";
 import {
   DeckWatcher,
   isDeckWatchSupported,
@@ -23,7 +24,7 @@ import {
   type DeckWatchStatus,
 } from "@/lib/deckWatcher";
 import { ConfirmDeckReloadDialog } from "@/components/controller/ConfirmDeckReloadDialog";
-import { track, sha256Hex, startRecording } from "@/lib/analytics";
+import { track, startRecording } from "@/lib/analytics";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { usePluginHost } from "@/lib/plugins/usePluginHost";
@@ -87,7 +88,6 @@ export default function Presentation() {
   // The current slide's container, which a dashboard layout change replaces:
   // rendering follows the element, not just the ref.
   const [currentCanvasRef, currentCanvasEl] = useElementRef<HTMLDivElement>();
-  const channelRef = useRef<BroadcastChannel | null>(null);
   // Object URL backing a local session's PDF, swapped when notes are edited.
   const localUrlRef = useRef("");
   // Resolved during load: true if this presentation's PDF lives in this
@@ -427,172 +427,21 @@ export default function Presentation() {
     return () => { document.title = "Presio"; };
   }, [filename, role]);
 
-  useEffect(() => {
-    if (local === null) return; // wait until we know local vs. server
-
-    const channel = new BroadcastChannel(`presio-${id}`);
-    channelRef.current = channel;
-    channel.onmessage = (e) => {
-      const { type, payload } = e.data;
-      if (type === "slide_update") setCurrentSlide(payload.slideNumber);
-      else if (type === "blank_update") setBlanked(payload.blanked);
-      else if (type === "deck_update") void applyDeckUpdate(payload);
-      else if (type === "session_ended") navigate("/", { replace: true });
-      else if (type === "rekeyed") {
-        // The presenter shared this deck from another window. Its local record
-        // is gone and the code the server minted is where it lives now, so
-        // follow it — the alternative is a viewer left on an id that no longer
-        // resolves to anything.
-        navigate(`/s/${payload.id}?role=${requestedRole}`, { replace: true });
-      }
-      else if (type === "state_request") {
-        // Controller is the source of truth for a local session; reply so a
-        // newly opened or reloaded window can catch up.
-        if (requestedRole === "controller") {
-          channel.postMessage({ type: "state_sync", payload: stateRef.current });
-        }
-      } else if (type === "state_sync") {
-        setCurrentSlide(payload.currentSlide);
-        if (payload.totalSlides) setTotalSlides(payload.totalSlides);
-        setBlanked(payload.blanked);
-      }
-    };
-
-    // Local sessions never touch the server: no socket, sync over the channel.
-    if (local) {
-      // Subscribing to a transport: the role this window starts with is part
-      // of setting that transport up, not something a render can derive.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      applyRole(requestedRole);
-      channel.postMessage({ type: "state_request" });
-      return () => {
-        channel.close();
-        channelRef.current = null;
-      };
-    }
-
-    const { controllerToken } = getSessionAuth(id!);
-
-    // Re-emit join on every (re)connect, not just the first mount. Socket.io
-    // transparently reconnects after a network blip, server restart, or a
-    // sleeping laptop, but the reconnected socket is in no room and would
-    // silently miss every broadcast until it re-joins (looking connected the
-    // whole time). The server answers join_session with full session_state, so
-    // this also reconciles anything that changed while we were away, and
-    // re-registers the controller after a server restart wiped its in-memory map.
-    const join = () => {
-      socket.emit("join_session", { sessionId: id, role: requestedRole, token: controllerToken });
-    };
-
-    socket.on("connect", join);
-    socket.connect();
-    startClockSync();
-    if (socket.connected) join();
-
-    // Re-request authoritative state when a viewer's tab returns to the
-    // foreground — background tabs get frozen and can miss broadcasts.
-    const reconcile = () => {
-      if (requestedRole === "viewer" && !document.hidden && socket.connected) join();
-    };
-    document.addEventListener("visibilitychange", reconcile);
-
-    // Recovery / reconciliation watchdog. While disconnected, every role nudges
-    // the socket to reconnect on a fast 5s cadence so a dropped connection comes
-    // back quickly instead of waiting out socket.io's backoff. While connected,
-    // viewers re-request state on a slow backstop interval in case a broadcast
-    // was ever dropped without a disconnect — kept infrequent and skipped while
-    // hidden so a large audience can't hammer the server. The controller is
-    // excluded from the backstop: it drives state, so reconciling it from the
-    // server could yank it back mid-advance.
-    const RECONNECT_EVERY_MS = 5000;
-    const RECONCILE_EVERY_MS = 30000;
-    let sinceReconcile = 0;
-    const watchdog = setInterval(() => {
-      if (!socket.connected) {
-        socket.connect(); // idempotent; nudges reconnection if it stalled
-        sinceReconcile = 0;
-        return;
-      }
-      sinceReconcile += RECONNECT_EVERY_MS;
-      if (sinceReconcile >= RECONCILE_EVERY_MS && requestedRole === "viewer" && !document.hidden) {
-        sinceReconcile = 0;
-        join();
-      }
-    }, RECONNECT_EVERY_MS);
-
-    socket.on("session_state", ({ currentSlide, totalSlides, role: grantedRole }) => {
-      setCurrentSlide(currentSlide);
-      setTotalSlides(totalSlides);
-      if (grantedRole && grantedRole !== requestedRole) {
-        applyRole(grantedRole);
-        setSearchParams({ role: grantedRole }, { replace: true });
-      } else {
-        applyRole(requestedRole);
-      }
-    });
-
-    socket.on("slide_update", ({ slideNumber }) => {
-      setCurrentSlide(slideNumber);
-    });
-
-    // The controller corrected the session's page count against the document
-    // it loaded; follow suit and stay in range.
-    socket.on("total_slides_update", ({ totalSlides }: { totalSlides: number }) => {
-      setTotalSlides(totalSlides);
-      setCurrentSlide((slide) => Math.min(Math.max(slide, 1), totalSlides));
-    });
-
-    socket.on("sync_all", () => {
-      setViewerSlide(null);
-    });
-
-    socket.on("blank_update", ({ blanked }: { blanked: boolean }) => {
-      setBlanked(blanked);
-    });
-
-    // The controller replaced the deck (server broadcast from the replace
-    // endpoint); reload the new document under the same session. The window
-    // that performed the replace has usually applied it already, straight from
-    // the reply to its own upload — this then coalesces into that swap.
-    socket.on("deck_updated", (payload: { filename: string; totalSlides: number }) => {
-      void applyDeckUpdate(payload);
-    });
-
-    // Another window took controllership (same token, e.g. a second tab).
-    // Demote this one to a viewer — updating the role param re-runs this
-    // effect, so the tab rejoins as a viewer and won't grab control back on
-    // its next reconnect.
-    socket.on("controller_replaced", () => {
-      applyRole("viewer");
-      setSearchParams({ role: "viewer" }, { replace: true });
-    });
-
-    socket.on("error", ({ message }) => {
-      setError(message);
-    });
-
-    socket.on("session_ended", () => {
-      navigate("/", { replace: true });
-    });
-
-    return () => {
-      channel.close();
-      channelRef.current = null;
-      document.removeEventListener("visibilitychange", reconcile);
-      clearInterval(watchdog);
-      socket.off("connect", join);
-      socket.off("session_state");
-      socket.off("slide_update");
-      socket.off("total_slides_update");
-      socket.off("sync_all");
-      socket.off("blank_update");
-      socket.off("deck_updated");
-      socket.off("controller_replaced");
-      socket.off("error");
-      socket.off("session_ended");
-      socket.disconnect();
-    };
-  }, [id, local, requestedRole, navigate, setSearchParams, applyRole, applyDeckUpdate, stateRef]);
+  const channelRef = useSessionTransport({
+    id,
+    local,
+    requestedRole,
+    stateRef,
+    setCurrentSlide,
+    setTotalSlides,
+    setBlanked,
+    setViewerSlide,
+    setError,
+    applyRole,
+    applyDeckUpdate,
+    navigate,
+    setSearchParams,
+  });
 
   // Report the settled role to analytics. The `?role=` query param is already
   // in every tracked URL, but Umami's Pages report keys on the path alone, so
@@ -625,21 +474,13 @@ export default function Presentation() {
   useEffect(() => {
     if (!pdf || !currentCanvasEl || !view.width) return;
     const container = currentCanvasEl;
-    // renderPage resolves out of order (cached pages are near-instant, fresh
-    // ones aren't), so a rapid slide change could leave a stale page on screen
-    // — with plugins' layers already showing the new slide over it. Drop any
-    // render that finishes after the effect has moved on.
-    let stale = false;
-    renderPage(pdf, displaySlide, { targetWidth: view.width, targetHeight: view.height }).then((canvas) => {
-      if (stale) return;
-      container.innerHTML = "";
-      canvas.style.width = "100%";
-      canvas.style.height = "100%";
-      canvas.style.objectFit = "contain";
-      container.appendChild(canvas);
-      if (loadTimerRef.current?.pdf === pdf) loadTimerRef.current.timer.mark("paint");
+    // A rapid slide change could otherwise leave a stale page on screen —
+    // with plugins' layers already showing the new slide over it.
+    return renderPageInto(container, pdf, displaySlide, { targetWidth: view.width, targetHeight: view.height }, {
+      onPainted: () => {
+        if (loadTimerRef.current?.pdf === pdf) loadTimerRef.current.timer.mark("paint");
+      },
     });
-    return () => { stale = true; };
     // The container comes and goes with the view (and card) that owns it:
     // render into whichever one is mounted now.
   }, [pdf, displaySlide, currentCanvasEl, view.width, view.height]);
@@ -656,7 +497,7 @@ export default function Presentation() {
       if (!local && socketEmit) socket.emit(socketEmit.event, socketEmit.payload);
       channelRef.current?.postMessage(channelMsg);
     },
-    [local]
+    [local, channelRef]
   );
 
   // Opening a deck isn't presenting it. A few slide changes is the signal
@@ -698,7 +539,7 @@ export default function Presentation() {
       await endSession(id!);
     }
     navigate("/", { replace: true });
-  }, [local, id, navigate]);
+  }, [local, id, navigate, channelRef]);
 
   // Authorization for rewriting a synced deck's stored PDF. The server accepts
   // either the presentation's controller token or the logged-in owner's bearer
@@ -708,163 +549,28 @@ export default function Presentation() {
   // wrong for one that matters: a signed-in presenter who took control by
   // passphrase isn't the owner, so their token doesn't authorize the write and
   // the controller token that would was never sent.
-  const pdfWriteAuth = useCallback(async (): Promise<Record<string, string>> => {
-    const headers: Record<string, string> = {};
-    const { controllerToken } = getSessionAuth(id!);
-    if (controllerToken) headers["x-controller-token"] = controllerToken;
-    if (authEnabled) {
-      const { data } = await supabase.auth.getSession();
-      const accessToken = data.session?.access_token;
-      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-    }
-    if (!Object.keys(headers).length) {
-      throw new Error("This browser isn't the controller for this presentation");
-    }
-    return headers;
-  }, [id]);
+  const pdfWriteAuth = useCallback(() => controllerHeaders(id!), [id]);
 
-  // Remote republish watching for URL-backed decks. A deck loaded from an
-  // external link re-fetches its PDF on every load, so a republish at the
-  // same URL is only invisible to a session that is already running. The
-  // controller polls the server's cheap metadata endpoint (one poller per
-  // session — viewers never poll) and, when the remote file provably changed,
-  // offers the new deck through the header pill. Same house rule as the file
-  // watcher: nothing swaps until the presenter clicks, and nothing surfaces
-  // when the host is unreachable or doesn't support the check.
+  // Remote republish watching for URL-backed decks (lib/remoteDeckPoller.ts):
+  // the controller of a deck loaded from someone else's URL offers a
+  // republished version through the header pill.
   useEffect(() => {
     if (local !== false || role !== "controller") return;
     const base = pdfUrlRef.current;
     if (!base || base.startsWith("blob:")) return;
-
-    const BASE_MS = 30_000;
-    const MAX_MS = 4 * 60_000;
-    interface Sig {
-      etag: string;
-      lastModified: string;
-      contentLength: string;
-    }
-    const same = (a: Sig, b: Sig) =>
-      a.etag === b.etag && a.lastModified === b.lastModified && a.contentLength === b.contentLength;
-    const hasValidators = (s: Sig) => !!(s.etag || s.lastModified || s.contentLength);
-
-    let stopped = false;
-    let busy = false; // a poll's probes + parse can outlast one interval; never overlap
-    let backedOff = false; // parked at the slow cadence by an unreachable host
-    let delay = BASE_MS;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let baseline: Sig | null = null;
-    let candidate: Sig | null = null;
-
-    const stop = () => {
-      stopped = true;
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-    };
-    const schedule = () => {
-      if (stopped) return;
-      timer = setTimeout(() => { void poll(); }, delay);
-    };
-
-    const poll = async () => {
-      if (stopped || busy) return;
-      // Frozen background tabs can't present anyway; skip the round without
-      // spending a request on the remote host.
-      if (document.hidden) {
-        schedule();
-        return;
-      }
-      busy = true;
-      try {
-        let headers: Record<string, string>;
-        try {
-          headers = await pdfWriteAuth();
-        } catch {
-          stop(); // no credential to poll with — degrade silently
-          return;
-        }
-        let sig: Sig;
-        try {
-          const res = await fetch(`/api/sessions/${id}/remote-version`, { headers });
-          if (res.status === 403 || res.status === 404) {
-            stop(); // session gone, or not URL-backed: nothing to watch
-            return;
-          }
-          if (!res.ok) {
-            // Remote host unreachable (the server answers 502): back off to
-            // the slowest cadence and keep trying, still silently.
-            delay = MAX_MS;
-            backedOff = true;
-            schedule();
-            return;
-          }
-          sig = await res.json();
-          if (backedOff) {
-            // The host answered again. Without this the session stays parked at
-            // the four-minute cadence for good, since only a confirmed change
-            // resets it — and it can't see one while the host is down.
-            backedOff = false;
-            delay = BASE_MS;
-          }
-        } catch {
-          stop(); // network failure — today's behaviour, without errors
-          return;
-        }
-        if (!hasValidators(sig)) {
-          stop(); // host sends no validators — there is nothing to compare
-          return;
-        }
-        if (!baseline) {
-          baseline = sig; // first observation is the reference, never a change
-          schedule();
-          return;
-        }
-        if (same(sig, baseline)) {
-          candidate = null;
-          delay = Math.min(delay * 2, MAX_MS); // polite backoff while unchanged
-          schedule();
-          return;
-        }
-        // Different from the baseline. Hosts behind some CDNs mint a fresh
-        // ETag per request, so require the new signature to hold steady
-        // across two consecutive polls before trusting it.
-        if (!candidate || !same(sig, candidate)) {
-          candidate = sig;
-          schedule();
-          return;
-        }
-        // Confirmed change: read the new document's page count before
-        // offering it, so applying clamps correctly. A parse failure means
-        // the publish is probably mid-flight — keep watching silently and
-        // re-detect on the next poll.
-        candidate = null;
-        try {
-          // Always external here: the server only answers remote-version for a
-          // deck backed by someone else's URL.
-          const doc = await loadLatestPdf(base, { external: true, version: Date.now() });
-          if (stopped) {
-            destroyPdf(doc);
-            return;
-          }
-          // Keep it: if the presenter applies this update, applyDeckUpdate
-          // adopts the document instead of downloading the same bytes again.
-          destroyPdf(prefetchedDeckRef.current);
-          prefetchedDeckRef.current = doc;
-          baseline = sig;
-          delay = BASE_MS; // stay fast for a while after a real change
-          setRemoteUpdate({ totalSlides: doc.numPages });
-          setReloadPrompt("remote");
-        } catch {
-          // candidate stays null: the next poll re-confirms and retries.
-        }
-        schedule();
-      } finally {
-        busy = false;
-      }
-    };
-
-    schedule();
+    const stop = watchRemoteDeck({
+      sessionId: id!,
+      pdfUrl: base,
+      headers: pdfWriteAuth,
+      onUpdate: (doc) => {
+        // Keep it: if the presenter applies this update, applyDeckUpdate
+        // adopts the document instead of downloading the same bytes again.
+        destroyPdf(prefetchedDeckRef.current);
+        prefetchedDeckRef.current = doc;
+        setRemoteUpdate({ totalSlides: doc.numPages });
+        setReloadPrompt("remote");
+      },
+    });
     return () => {
       stop();
       destroyPdf(prefetchedDeckRef.current);
@@ -966,19 +672,7 @@ export default function Presentation() {
   const replacePdf = useCallback(
     async (file: File, handle?: FileSystemFileHandle) => {
       if (local === null) return;
-      const buf = await file.arrayBuffer();
-      // Snapshot before pdf.js transfers the buffer away (see Home.upload).
-      const blob = new Blob([buf], { type: "application/pdf" });
-      let sha256: string | undefined;
-      try {
-        sha256 = await sha256Hex(buf);
-      } catch {
-        // No crypto.subtle (plain-http origins): track without a fingerprint.
-      }
-      const doc = await openPdf({ data: new Uint8Array(buf) });
-      const totalSlides = doc.numPages;
-      destroyPdf(doc);
-      const filename = file.name.replace(/\.pdf$/i, "");
+      const { blob, sha256, filename, totalSlides } = await readPdfFile(file);
 
       if (local) {
         const rec = await idbGet(id!);
@@ -1036,7 +730,7 @@ export default function Presentation() {
       // so restart the watcher against it.
       if (handle) setWatchedHandleEpoch((n) => n + 1);
     },
-    [local, id, applyDeckUpdate, pdfWriteAuth]
+    [local, id, applyDeckUpdate, pdfWriteAuth, channelRef]
   );
 
   // Pill click: swap the detected recompile in for controller and viewers via

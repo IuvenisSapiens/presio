@@ -11,7 +11,7 @@ import { getAllowedOrigins, buildCspDirectives, PLUGIN_FRAME_CSP } from "./secur
 import { canonicalBaseUrl, originPair } from "./lib/baseUrl.js";
 import { localBlobsDir } from "./local/paths.js";
 import { isLocalMode } from "./local/mode.js";
-import { registerSessionRoutes } from "./routes/sessions.js";
+import { registerSessionRoutes } from "./routes/sessions/index.js";
 import { registerHistoryRoutes } from "./routes/history.js";
 import type { HistoryBucket } from "./history.js";
 import { registerNewsletterRoutes } from "./routes/newsletter.js";
@@ -20,7 +20,7 @@ import { registerLanAddressRoute } from "./routes/lanAddress.js";
 import { registerAgentDocRoutes } from "./routes/agentDocs.js";
 import { registerMcpRoutes } from "./routes/mcp.js";
 import { registerPluginRoutes } from "./routes/plugins.js";
-import type { SocketState } from "./socket.js";
+import type { SocketState } from "./socket/index.js";
 import { APP_VERSION } from "./version.js";
 
 export interface AppDeps {
@@ -101,7 +101,7 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
   // Note this is not brute-force protection either way: the shared-control
   // passphrase is 8 characters over a 32-symbol alphabet (~2^40), and live
   // presenting (slide changes, laser, drawing) runs over Socket.IO rather than
-  // HTTP, so it never passed through the limiter at all — see socket.ts.
+  // HTTP, so it never passed through the limiter at all — see socket/guards.ts.
 
   // The MCP tools (present_pdf / check_pdf) take the PDF base64-encoded inside
   // the JSON-RPC body, so /mcp needs a body limit in the same league as the
@@ -267,6 +267,21 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
   // Report unhandled route errors to Sentry. No-op when Sentry isn't
   // initialized (no DSN), and must come after all routes.
   Sentry.setupExpressErrorHandler(app);
+
+  // Anything a route throws (Express 5 forwards async rejections here) ends as
+  // JSON, never Express's default HTML page: every caller of these paths is a
+  // client that parses the body. Routes answer the errors they expect
+  // themselves; this is for the ones they don't.
+  app.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error(`${req.method} ${req.path} failed:`, err);
+    // Too late for a status: let Express close the connection.
+    if (res.headersSent) return next(err);
+    if (req.path === "/mcp") {
+      res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
+      return;
+    }
+    res.status(500).json({ error: "Internal server error" });
+  });
 
   return app;
 }
