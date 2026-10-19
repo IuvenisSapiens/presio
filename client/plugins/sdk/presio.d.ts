@@ -1,5 +1,6 @@
-// Types for `window.presio`, the API public/plugin-frame.html installs in the
-// each plugin frame. Keep in step with that file and /plugins.md.
+// Types for `window.presio`, plugin API version 1: what
+// public/plugin-frame.html installs in each plugin frame. Keep in step with
+// that file, shared/plugin/protocol.ts and /plugins.md.
 
 type Unsubscribe = () => void;
 
@@ -28,7 +29,22 @@ type PresioMenuEntry =
   | { heading: string }
   | { separator: true };
 
-/** A file the presenter picked for a button with "accept". */
+/** A status item's content (presio.ui.setStatus). */
+interface PresioStatus {
+  text: string;
+  tooltip?: string;
+  icon?: PresioIcon;
+  /** One of the plugin's commands, run by a click on the item. */
+  command?: string;
+  args?: unknown;
+}
+
+/** Icons a contribution may name. */
+type PresioIcon =
+  | "qr-code" | "bar-chart" | "message" | "users" | "timer" | "bell" | "star" | "sparkles" | "hand" | "check" | "eye"
+  | "megaphone" | "pen" | "download" | "upload";
+
+/** A file the presenter picked for a button with "accept" (a command's args.file). */
 interface PresioFile {
   name: string;
   type: string;
@@ -39,6 +55,7 @@ interface PresioMessage {
   type: string;
   payload: unknown;
   from: "presenter" | "audience";
+  /** From the audience: the viewer's id, as in presio.viewers. */
   sender?: string;
 }
 
@@ -80,27 +97,81 @@ interface PresioHistory<S, Op> {
   onError(cb: (id: string, message: string) => void): Unsubscribe;
 }
 
+/** Viewers' values under a key, counted (presio.audience.summary). */
+interface PresioAudienceSummary {
+  /** How many viewers have a value. */
+  total: number;
+  /** Identical values (compared as JSON with sorted keys), most common first. */
+  values: { value: unknown; count: number }[];
+}
+
+/** Viewers' values under a key changed (presio.audience.onChange). */
+interface PresioAudienceChange {
+  key: string;
+  summary: PresioAudienceSummary;
+  /** By viewer id, since the last change: the new value, or null when removed. */
+  changes: Record<string, unknown>;
+  /** The values were replaced wholesale (cleared, or re-synced): read all(). */
+  reset: boolean;
+}
+
+/** What a host can do (presio.supports()); see shared/plugin/protocol.ts. */
+type PresioCapability =
+  | "slide" | "context" | "settings" | "storage" | "messages" | "commands" | "deck" | "layers"
+  | "history" | "blobs" | "clock" | "ui" | "panels" | "audience" | "status" | "viewerSheet" | "palette" | "viewers";
+
+/** Why a call failed: an Error with one of these as `code`. */
+type PresioErrorCode = "MethodNotFound" | "PermissionDenied" | "InvalidParams" | "Unavailable" | "Internal";
+
+interface PresioError extends Error {
+  code: PresioErrorCode;
+}
+
+/** What a command's handler gets: Presio's buttons pass { file } (a button
+ *  with "accept"), { menuItem } (a pick from its menu) or { slide } (a
+ *  thumbnail's menu); keybindings and the palette pass {};
+ *  presio.commands.execute passes the caller's args. */
+type PresioCommandArgs = { file?: PresioFile; menuItem?: string; slide?: number; [key: string]: unknown } | null;
+
+type PresioSurface = "background" | "panel" | "viewerSheet" | "viewer" | "slide";
+
 interface Presio {
-  readonly pluginId: string;
-  /** The plugin's own folder, absolute: relative URLs resolve against it. */
-  readonly baseUrl: string;
-  readonly surface: "background" | "tile" | "viewer" | "slide";
+  /** The plugin API's major version this frame implements (the manifest's "presio"). */
+  readonly apiVersion: 1;
+  /** What the host can do. */
+  readonly capabilities: PresioCapability[];
+  supports(capability: PresioCapability): boolean;
+  /** This plugin: its id comes from where it was loaded from ("alice/poll",
+   *  "presio/timer"); baseUrl is its own folder, which relative URLs resolve against. */
+  readonly plugin: { id: string; name: string; displayName: string; version: string; baseUrl: string };
+  readonly surface: PresioSurface;
+  /** Panel surface: the id of the panel (contributes.panels) this frame draws; else null. */
+  readonly panel: string | null;
   readonly role: "presenter" | "audience";
   readonly theme: "light" | "dark";
   readonly session: { id: string; local: boolean; joinUrl: string | null };
+  onContextChange(cb: (presio: Presio) => void): Unsubscribe;
   readonly slide: {
     readonly current: number;
     readonly total: number;
     onChange(cb: (slide: { current: number; total: number }) => void): Unsubscribe;
   };
-  onContextChange(cb: (presio: Presio) => void): Unsubscribe;
-  /** The presenter's key for one of this plugin's keybindings' commands
-   *  ("E", "⌘Z"), or null when it has none; a change calls onContextChange. */
-  shortcut(command: string): string | null;
-  /** retain: true for the session, "deck" until the deck is replaced; a
-   *  retained null forgets the type. volatile: may be dropped, not queued. */
-  send(type: string, payload?: unknown, opts?: { retain?: boolean | "deck"; volatile?: boolean }): void;
-  onMessage(cb: (message: PresioMessage) => void): Unsubscribe;
+  readonly messages: {
+    /** retain: true for the session, "deck" until the deck is replaced; a
+     *  retained null forgets the type. volatile: may be dropped, not queued.
+     *  to: presenter only, for that one viewer (presio.viewers); not retained. */
+    send(type: string, payload?: unknown, opts?: { retain?: boolean | "deck"; volatile?: boolean; to?: string }): void;
+    onMessage(cb: (message: PresioMessage) => void): Unsubscribe;
+  };
+  /** Presenter: the viewers running this plugin, by id (a message's `sender`,
+   *  and its `to`). One joins when the plugin's first frame on its device
+   *  starts and leaves when the last goes; a reconnect gets a new id. Start
+   *  from `ids`: viewers already there when the frame starts don't join. */
+  readonly viewers: {
+    readonly ids: string[];
+    onJoin(cb: (viewer: string) => void): Unsubscribe;
+    onLeave(cb: (viewer: string) => void): Unsubscribe;
+  };
   readonly settings: {
     get(name: string): unknown;
     readonly all: Record<string, unknown>;
@@ -113,14 +184,26 @@ interface Presio {
     set(key: string, value?: unknown): void;
     onChange(cb: (storage: Record<string, unknown>) => void): Unsubscribe;
   };
-  /** A contributed button was pressed; one with "accept" brings the file picked. */
-  onButton(id: string, cb: (id: string, file?: PresioFile) => void): Unsubscribe;
-  /** An item was picked from a button's menu. */
-  onMenu(id: string, cb: (item: string, id: string) => void): Unsubscribe;
-  /** A contributed keybinding's command (contributes.keybindings). */
-  onCommand(command: string, cb: (command: string) => void): Unsubscribe;
+  readonly commands: {
+    /** Handle one of this plugin's commands (contributes.commands) in this
+     *  frame; what the handler returns is the command's result. */
+    register(id: string, handler: (args: PresioCommandArgs) => unknown): Unsubscribe;
+    /** Run a command on this device — "<plugin id>.<command>", a bare id for
+     *  this plugin's own, or one of Presio's ("presio.nextSlide",
+     *  "presio.prevSlide", "presio.firstSlide", "presio.lastSlide",
+     *  "presio.goToSlide" with { slide }) — and get its result. */
+    execute<T = unknown>(command: string, args?: unknown): Promise<T>;
+    /** The presenter's key for one of this plugin's commands ("E", "⌘Z"),
+     *  or null when it has none; a change calls onContextChange. */
+    shortcut(id: string): string | null;
+  };
   readonly deck: {
-    attachments(): Promise<{ filename: string; bytes: Uint8Array }[]>;
+    /** Every file the PDF carries, of any type: the document's own, then those
+     *  attached to a page, which say which `page` (1-based) and where on it
+     *  (`rect`: fractions of the page, top-left origin). */
+    attachments(): Promise<
+      { filename: string; bytes: Uint8Array; page?: number; rect?: { x: number; y: number; w: number; h: number } }[]
+    >;
     bytes(): Promise<Uint8Array>;
     /** Each page's size in PDF points, in page order. */
     pages(): Promise<{ width: number; height: number }[]>;
@@ -146,10 +229,46 @@ interface Presio {
     put(data: Blob | Uint8Array | ArrayBuffer): Promise<string>;
     get(sha: string): Promise<Blob | null>;
   };
+  /** Each viewer's input ("audience" permission): one slot per viewer under
+   *  each key the presenter opens. Values are JSON, at most 16 KB. */
+  readonly audience: {
+    /** Viewer: write this viewer's own value under an open key (null removes
+     *  it). Rejects with "Unavailable" when the key is closed. */
+    set(key: string, value: unknown): Promise<void>;
+    /** Viewer: this viewer's own value under a key, or null. */
+    get(key: string): unknown;
+    state(key: string): { open: boolean };
+    onState(cb: (e: { key: string; open: boolean }) => void): Unsubscribe;
+    onState(key: string, cb: (e: { key: string; open: boolean }) => void): Unsubscribe;
+    /** Viewer: this viewer's own value changed (cleared, or set by another surface). */
+    onMine(cb: (e: { key: string; value: unknown }) => void): Unsubscribe;
+    onMine(key: string, cb: (e: { key: string; value: unknown }) => void): Unsubscribe;
+    /** Presenter: start, stop or reset taking viewers' values for a key. */
+    open(key: string): Promise<void>;
+    close(key: string): Promise<void>;
+    clear(key: string): Promise<void>;
+    /** Presenter: every viewer's value, by anonymous viewer id. */
+    all(key: string): Promise<Record<string, unknown>>;
+    /** Presenter: identical values counted, most common first. */
+    summary(key: string): Promise<PresioAudienceSummary>;
+    /** Presenter: viewers' values changed (a few times a second at most). */
+    onChange(cb: (e: PresioAudienceChange) => void): Unsubscribe;
+    onChange(key: string, cb: (e: PresioAudienceChange) => void): Unsubscribe;
+  };
   readonly ui: {
+    /** "viewer" surface: show or hide its layer. "viewerSheet": open or close
+     *  its sheet (the viewer can close it too; see onVisibleChange). */
     setVisible(visible: boolean): void;
+    /** Whether this frame's layer or sheet is showing. */
+    readonly visible: boolean;
+    /** It was shown or hidden, by the plugin or by the viewer closing the sheet. */
+    onVisibleChange(cb: (visible: boolean) => void): Unsubscribe;
+    /** A status item (contributes.status) in the controller's header; null or
+     *  an empty text hides it. A click runs `command` with `args`. */
+    setStatus(id: string, status: PresioStatus | null): void;
     setInteractive(value: boolean | "pen" | { x: number; y: number; w: number; h: number }[]): void;
-    setButton(id: string, state: { active?: boolean; label?: string; disabled?: boolean; menu?: PresioMenuEntry[] }): void;
+    /** The state of the buttons that run a command; a menu pick runs it with { menuItem }. */
+    setButton(command: string, state: { active?: boolean; label?: string; disabled?: boolean; hidden?: boolean; menu?: PresioMenuEntry[] }): void;
     /** Slide surface: the part of it on screen (fractions of it) and its zoom. */
     readonly view: PresioView;
     onViewChange(cb: (view: PresioView) => void): Unsubscribe;

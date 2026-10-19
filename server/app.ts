@@ -19,6 +19,7 @@ import { registerCheckRoute } from "./routes/check.js";
 import { registerLanAddressRoute } from "./routes/lanAddress.js";
 import { registerAgentDocRoutes } from "./routes/agentDocs.js";
 import { registerMcpRoutes } from "./routes/mcp.js";
+import { registerPluginRoutes } from "./routes/plugins.js";
 import type { SocketState } from "./socket.js";
 import { APP_VERSION } from "./version.js";
 
@@ -150,6 +151,7 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
   // Local/dev only: lets share surfaces resolve this machine's LAN address
   // instead of asking the presenter to type it (see lib/lanAddress.ts).
   registerLanAddressRoute(app, { enabled: devOrLocal });
+  registerPluginRoutes(app);
   registerMcpRoutes(app, supabase, { io, socketState });
 
   // Unknown API paths must 404 as JSON — falling through to the SPA catch-all
@@ -171,7 +173,8 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
   const clientDist = path.join(__dirname, "../client/dist");
 
   // JSON schemas for the sidecar format — served at /schema/*.json
-  app.use("/schema", express.static(path.join(__dirname, "../../schema"), { index: false }));
+  // (A miss falls through to the SPA's catch-all, so don't let it.)
+  app.use("/schema", express.static(path.join(__dirname, "../schema"), { index: false, fallthrough: false }));
 
   // Local mode's blob store (server/local/blobStore.ts) writes PDFs here and
   // hands back relative /files/... URLs. In Supabase mode this directory
@@ -188,10 +191,21 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
   // would hash differently on every load and viewers would reject the
   // presenter's copy as "changed since".
   const pluginDir = path.join(clientDist, "plugins") + path.sep;
+  const assetsDir = path.join(clientDist, "assets") + path.sep;
   app.use(
     express.static(clientDist, {
       index: false,
       setHeaders: (res, filePath) => {
+        // The plugin API's types (/sdk/v1/presio.d.ts), which mime lookup
+        // would call MPEG video.
+        if (filePath.endsWith(".d.ts")) res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        // Vite's build output: every file under assets/ is named by content
+        // hash, so a deploy never changes one in place. Left at express's
+        // max-age=0, Cloudflare caps it at its 4h browser TTL instead.
+        if (filePath.startsWith(assetsDir)) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+          return;
+        }
         if (!filePath.startsWith(pluginDir)) return;
         res.setHeader(
           "Cache-Control",
@@ -202,6 +216,13 @@ export function createApp({ supabase, io, socketState }: AppDeps): express.Expre
       },
     })
   );
+
+  // A missing build asset is a stale client asking for an old hash. index.html
+  // with a 200 would make the browser fail it as a module parse error instead
+  // of a plain 404.
+  app.use("/assets", (_req, res) => {
+    res.status(404).type("text/plain").send("Not found");
+  });
 
   // Pages with a markdown mirror advertise it via rel="alternate".
   const MD_MIRRORS: Record<string, string> = {

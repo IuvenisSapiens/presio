@@ -9,6 +9,7 @@ import {
   sanitizePublishedPlugin,
   sanitizePluginSettings,
   sanitizePluginLoadFailure,
+  sanitizePluginPresence,
   MAX_PLUGINS_PER_SESSION,
   MAX_RETAINED_PER_PLUGIN,
   MAX_RETAINED_BYTES_PER_PLUGIN,
@@ -16,6 +17,7 @@ import {
   type PublishedPlugin,
   type Retain,
 } from "./validation.js";
+import { clearAudience, createAudienceState, registerAudienceHandlers, type AudienceState } from "./audience.js";
 import { HistoryError, HistoryStore, parseBase, sanitizeHead, sanitizeHistoryCommit, SHA256_RE, type HistoryBucket } from "./history.js";
 
 // A presenter plugin message kept for viewers who join later (the plugin's
@@ -45,6 +47,8 @@ export interface SocketState {
   pluginSettings: Map<string, Map<string, Record<string, unknown>>>;
   // Plugins' edit histories (presio.history) and their blobs, per session.
   history: HistoryStore;
+  // Each viewer's input to plugins (presio.audience, see audience.ts).
+  audience: AudienceState;
 }
 
 export function createSocketState(): SocketState {
@@ -55,6 +59,7 @@ export function createSocketState(): SocketState {
     pluginRetained: new Map(),
     pluginSettings: new Map(),
     history: new HistoryStore(),
+    audience: createAudienceState(),
   };
 }
 
@@ -65,6 +70,7 @@ export function clearSessionState(state: SocketState, sessionId: string) {
   state.publishedPlugins.delete(sessionId);
   state.pluginRetained.delete(sessionId);
   state.pluginSettings.delete(sessionId);
+  clearAudience(state.audience, sessionId);
   void state.history.drop(sessionId).catch((err) => console.warn(`Couldn't drop the history of session ${sessionId}:`, err));
 }
 
@@ -124,9 +130,10 @@ function takeToken(socket: Socket, key: "joinBucket" | "pluginBucket", burst: nu
 const allowJoin = (socket: Socket) => takeToken(socket, "joinBucket", JOIN_BURST, JOIN_REFILL_PER_SEC);
 
 // Viewers may message the presenter's plugins (a vote, a question), which makes
-// plugin_event the one audience-writable event. It carries no DB cost, but an
-// unthrottled phone could still flood the presenter, so it gets a bucket like
-// join_session's — generous enough for any human tapping buttons.
+// plugin_event and audience_set (a viewer's own slot, see audience.ts) the
+// audience-writable events. They carry no DB cost, but an unthrottled phone
+// could still flood the presenter, so they share a bucket like join_session's
+// — generous enough for any human tapping buttons.
 const AUDIENCE_PLUGIN_BURST = 20;
 const AUDIENCE_PLUGIN_REFILL_PER_SEC = 5;
 
@@ -150,6 +157,26 @@ export function registerSocketHandlers(
     settings: Object.fromEntries(pluginSettings.get(sessionId) ?? []),
     retained: [...(pluginRetained.get(sessionId)?.values() ?? [])].map(({ plugin, type, payload, retain }) => ({ plugin, type, payload, retain })),
   });
+
+  // Which viewers run which plugins (presio.viewers): each viewer socket keeps
+  // the plugins it has frames for in socket.data.plugins, and the controller
+  // hears each change. A viewer's id is its socket id, as in `sender`.
+  const presenceIn = (sessionId: string) => {
+    const viewers: { plugin: string; viewer: string }[] = [];
+    for (const id of io.sockets.adapter.rooms.get(sessionId) ?? []) {
+      if (controllers.get(sessionId) === id) continue;
+      for (const plugin of (io.sockets.sockets.get(id)?.data.plugins as Set<string> | undefined) ?? []) viewers.push({ plugin, viewer: id });
+    }
+    return viewers;
+  };
+  const setPresence = (socket: Socket, sessionId: string, next: Set<string>) => {
+    const prev: Set<string> = socket.data.plugins ?? new Set();
+    socket.data.plugins = next;
+    const controller = controllers.get(sessionId);
+    if (!controller || controller === socket.id) return;
+    for (const plugin of prev) if (!next.has(plugin)) io.to(controller).emit("plugin_viewer", { plugin, viewer: socket.id, here: false });
+    for (const plugin of next) if (!prev.has(plugin)) io.to(controller).emit("plugin_viewer", { plugin, viewer: socket.id, here: true });
+  };
 
   // Tail of each session's in-flight current_slide write, so overlapping
   // updates land in emit order (see slide_change).
@@ -234,6 +261,8 @@ export function registerSocketHandlers(
         }
       }
 
+      // Moving to another session: it stops running the old one's plugins.
+      if (socket.data.sessionId && socket.data.sessionId !== sessionId) setPresence(socket, socket.data.sessionId, new Set());
       socket.join(sessionId);
       socket.data.sessionId = sessionId;
       socket.data.role = grantedRole;
@@ -245,6 +274,8 @@ export function registerSocketHandlers(
         role: grantedRole,
       });
       socket.emit("plugins_state", pluginsState(sessionId));
+      // The controller starts from who's running which plugin (presio.viewers).
+      if (grantedRole === "controller") socket.emit("plugin_viewers", { viewers: presenceIn(sessionId) });
     });
 
     socket.on("slide_change", controllerOnly(socket, async (sessionId, { slideNumber }: { slideNumber: number }) => {
@@ -310,7 +341,7 @@ export function registerSocketHandlers(
       const next = new Map<string, PublishedPlugin>();
       for (const raw of payload.plugins.slice(0, MAX_PLUGINS_PER_SESSION)) {
         const plugin = sanitizePublishedPlugin(raw);
-        if (plugin) next.set(plugin.manifest.id, plugin);
+        if (plugin) next.set(plugin.id, plugin);
       }
       publishedPlugins.set(sessionId, next);
       io.to(sessionId).emit("plugins_state", pluginsState(sessionId));
@@ -339,6 +370,13 @@ export function registerSocketHandlers(
       const { plugin, type, payload } = event;
 
       if (controllers.get(sessionId) === socket.id) {
+        // For one viewer: only one in this session.
+        if (event.to) {
+          if (event.to === socket.id || !io.sockets.adapter.rooms.get(sessionId)?.has(event.to)) return;
+          const target = event.volatile ? io.to(event.to).volatile : io.to(event.to);
+          target.emit("plugin_event", { plugin, type, payload, from: "presenter" });
+          return;
+        }
         if (event.retain) retain(sessionId, { plugin, type, payload, retain: event.retain, size: jsonSize(payload) });
         // Volatile ones (a laser position) may be dropped for a viewer whose
         // connection is backed up, rather than queued behind newer ones.
@@ -353,6 +391,18 @@ export function registerSocketHandlers(
       const controller = controllers.get(sessionId);
       if (!controller) return;
       io.to(controller).emit("plugin_event", { plugin, type, payload, from: "audience", sender: socket.id });
+    });
+
+    // A viewer's plugins with frames running now (the whole set, re-sent on
+    // every join): the controller hears who started or stopped which.
+    socket.on("plugin_presence", (raw: unknown) => {
+      const { sessionId } = socket.data;
+      if (!sessionId || controllers.get(sessionId) === socket.id) return;
+      const plugins = sanitizePluginPresence(raw);
+      if (!plugins || !allowAudiencePluginEvent(socket)) return;
+      // Not checked against what's published: after a restart, viewers say
+      // what they run before the presenter has republished.
+      setPresence(socket, sessionId, new Set(plugins));
     });
 
     // A viewer couldn't load one of the published plugins (a presenter's
@@ -450,6 +500,15 @@ export function registerSocketHandlers(
       }
     }));
 
+    // --- Audience input (presio.audience, see audience.ts) ---
+    registerAudienceHandlers(socket, {
+      io,
+      state: state.audience,
+      controllers,
+      publishedPlugins,
+      allow: allowAudiencePluginEvent,
+    });
+
     socket.on("time_ping", (clientT1: number, ack?: (data: { serverTime: number; clientT1: number }) => void) => {
       if (typeof ack === "function") ack({ serverTime: Date.now(), clientT1 });
     });
@@ -458,6 +517,8 @@ export function registerSocketHandlers(
       const { sessionId } = socket.data;
       if (sessionId && controllers.get(sessionId) === socket.id) {
         controllers.delete(sessionId);
+      } else if (sessionId) {
+        setPresence(socket, sessionId, new Set());
       }
     });
   });

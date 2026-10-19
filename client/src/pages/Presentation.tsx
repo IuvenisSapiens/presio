@@ -1,12 +1,14 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams, useSearchParams, useNavigate, useLocation, Link } from "react-router-dom";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import { loadPdf, loadPdfData, freshPdfUrl, loadLatestPdf, renderPage, clearCache, openPdf, destroyPdf } from "@/lib/pdf";
-import { loadDeck, type Deck } from "@/lib/deck";
-import { useRenderTargetWidth } from "@/hooks/useRenderTargetWidth";
-import { lsGetString, lsSetString, deckWatchKey } from "@/lib/storage";
+import { loadPdf, loadPdfData, freshPdfUrl, loadLatestPdf, renderPage, clearCache, openPdf, destroyPdf, preloadPdf } from "@/lib/pdf";
+import { makeDeck, loadDeckExtras, type DeckExtras } from "@/lib/deck";
+import { useRenderTargetSize } from "@/hooks/useRenderTargetSize";
+import { useElementRef } from "@/hooks/useElementRef";
+import { lsGetString, lsSetString, lsRemove, deckWatchKey, slideKey } from "@/lib/storage";
 import { socket } from "@/lib/socket";
 import { useLatestRef } from "@/hooks/useLatestRef";
+import { DeckLoadTimer } from "@/lib/deckLoadMetrics";
 import { startClockSync } from "@/lib/clock";
 import { supabase } from "@/lib/supabaseClient";
 import { authEnabled } from "@/lib/authMode";
@@ -21,7 +23,7 @@ import {
   type DeckWatchStatus,
 } from "@/lib/deckWatcher";
 import { ConfirmDeckReloadDialog } from "@/components/controller/ConfirmDeckReloadDialog";
-import { track, sha256Hex } from "@/lib/analytics";
+import { track, sha256Hex, startRecording } from "@/lib/analytics";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { usePluginHost } from "@/lib/plugins/usePluginHost";
@@ -46,6 +48,12 @@ export default function Presentation() {
     setRole(next);
     setSettledRole(next);
   }, []);
+  const settledRoleRef = useLatestRef(settledRole);
+
+  // Times the current load (see deckLoadMetrics), paired with the document it
+  // loaded so the render and extras effects only mark stages for that one —
+  // not for a deck swapped in later.
+  const loadTimerRef = useRef<{ timer: DeckLoadTimer; pdf: PDFDocumentProxy | null } | null>(null);
 
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [pdfUrl, setPdfUrl] = useState("");
@@ -57,19 +65,28 @@ export default function Presentation() {
   const [error, setError] = useState("");
   const [blanked, setBlanked] = useState(false);
 
-  // Everything extracted from the loaded PDF (links, attachments…),
-  // re-derived whenever the document is swapped (e.g. after a notes edit).
-  const [deck, setDeck] = useState<Deck | null>(null);
+  // Everything extracted from the loaded PDF, re-derived whenever the
+  // document is swapped (e.g. after a notes edit). The deck exists as soon as
+  // the PDF opens; links and attachments join it once the pages' annotations
+  // are read, which the first slide doesn't wait for.
+  const [extras, setExtras] = useState<{ pdf: PDFDocumentProxy; extras: DeckExtras } | null>(null);
   useEffect(() => {
     if (!pdf) return;
     let cancelled = false;
-    loadDeck(pdf, pdfUrl, filename).then((loaded) => {
-      if (!cancelled) setDeck(loaded);
+    loadDeckExtras(pdf).then((loaded) => {
+      if (loadTimerRef.current?.pdf === pdf) loadTimerRef.current.timer.mark("extras");
+      if (!cancelled) setExtras({ pdf, extras: loaded });
     });
     return () => { cancelled = true; };
-  }, [pdf, pdfUrl, filename]);
+  }, [pdf]);
+  const deck = useMemo(
+    () => (pdf ? makeDeck(pdf, pdfUrl, filename, extras?.pdf === pdf ? extras.extras : undefined) : null),
+    [pdf, pdfUrl, filename, extras]
+  );
 
-  const currentCanvasRef = useRef<HTMLDivElement>(null);
+  // The current slide's container, which a dashboard layout change replaces:
+  // rendering follows the element, not just the ref.
+  const [currentCanvasRef, currentCanvasEl] = useElementRef<HTMLDivElement>();
   const channelRef = useRef<BroadcastChannel | null>(null);
   // Object URL backing a local session's PDF, swapped when notes are edited.
   const localUrlRef = useRef("");
@@ -198,6 +215,11 @@ export default function Presentation() {
     };
   }, [canWatchDeck, id, watchedHandleEpoch, deckWatchMode, deckWatchModeRef]);
 
+  // A local deck's controller keeps its slide across a reload.
+  useEffect(() => {
+    if (local && role === "controller") lsSetString(slideKey(id!), String(currentSlide));
+  }, [currentSlide, local, role, id]);
+
   // Persist the live-reload choice per deck, so it survives a reload.
   useEffect(() => {
     if (local && role === "controller") lsSetString(deckWatchKey(id!), deckWatchMode);
@@ -286,6 +308,12 @@ export default function Presentation() {
   useEffect(() => {
     let cancelled = false;
     let localUrl = "";
+    // Either way this ends in pdf.js: fetch it and start its worker alongside
+    // the record/session lookup rather than after it.
+    preloadPdf();
+    const timer = new DeckLoadTimer();
+    if (settledRoleRef.current) timer.settle(settledRoleRef.current);
+    loadTimerRef.current = { timer, pdf: null };
     (async () => {
       try {
         // If the PDF is in this browser's IndexedDB, it's a local session —
@@ -296,10 +324,16 @@ export default function Presentation() {
         if (rec) {
           if (cancelled) return;
           setLocal(true);
+          // Back on the slide it was on. Restored with `local`, before the
+          // effect that saves it can see this deck on slide 1.
+          setCurrentSlide(Math.min(Math.max(Number(lsGetString(slideKey(id!))) || 1, 1), rec.totalSlides));
           localUrl = URL.createObjectURL(rec.blob);
           localUrlRef.current = localUrl;
           const doc = await loadPdf(localUrl);
           if (cancelled) return;
+          timer.mark("open");
+          timer.describe("local", doc.numPages, rec.blob.size);
+          loadTimerRef.current = { timer, pdf: doc };
           setPdfUrl(localUrl);
           setPdf(doc);
           setFilename(rec.filename);
@@ -335,6 +369,10 @@ export default function Presentation() {
           replacedAt ? freshPdfUrl(session.pdfUrl, replacedAt) : session.pdfUrl
         );
         if (cancelled) return;
+        timer.mark("open");
+        // The full length, even while a range-loaded deck is still streaming in.
+        void doc.getDownloadInfo().then(({ length }) => timer.describe("server", doc.numPages, length), () => {});
+        loadTimerRef.current = { timer, pdf: doc };
         // Store the canonical URL: later reloads append their own version.
         setPdfUrl(session.pdfUrl);
         setPdf(doc);
@@ -355,7 +393,7 @@ export default function Presentation() {
     // replacedAt belongs here: replacing the same deck again from Home routes
     // back to this already-mounted page with a new timestamp, and that has to
     // reload the document rather than leave the previous one on screen.
-  }, [id, replacedAt]);
+  }, [id, replacedAt, settledRoleRef]);
 
   // The loaded document decides the page count: URL-backed decks re-fetch
   // their PDF on every load, so a republished file can change the page count
@@ -565,37 +603,46 @@ export default function Presentation() {
   const trackedRoleRef = useRef("");
   useEffect(() => {
     if (!settledRole) return;
+    loadTimerRef.current?.timer.settle(settledRole);
     if (trackedRoleRef.current === settledRole) return;
     trackedRoleRef.current = settledRole;
     track("session-role", { role: settledRole, mode: local ? "local" : "server" });
+    if (settledRole === "controller") startRecording();
   }, [settledRole, local]);
+
+  // A deck that failed to open is the one thing a presenter can't work
+  // around, so every distinct message is worth a data point.
+  useEffect(() => {
+    if (error) track("presentation-error", { error, role: requestedRole });
+  }, [error, requestedRole]);
 
   // The canvas is rendered at the container's pixel size, so anything that
   // changes that size or scale — entering fullscreen, dragging the viewer onto
   // a projector, browser zoom, a move to a differently scaled monitor — has to
   // re-render, or the slide stays an upscaled canvas from the old size.
-  const viewWidth = useRenderTargetWidth(currentCanvasRef, !!deck);
+  const view = useRenderTargetSize(currentCanvasEl, !!deck);
 
   useEffect(() => {
-    if (!pdf || !currentCanvasRef.current || !viewWidth) return;
-    const container = currentCanvasRef.current;
+    if (!pdf || !currentCanvasEl || !view.width) return;
+    const container = currentCanvasEl;
     // renderPage resolves out of order (cached pages are near-instant, fresh
     // ones aren't), so a rapid slide change could leave a stale page on screen
     // — with plugins' layers already showing the new slide over it. Drop any
     // render that finishes after the effect has moved on.
     let stale = false;
-    renderPage(pdf, displaySlide, { targetWidth: viewWidth }).then((canvas) => {
+    renderPage(pdf, displaySlide, { targetWidth: view.width, targetHeight: view.height }).then((canvas) => {
       if (stale) return;
       container.innerHTML = "";
       canvas.style.width = "100%";
       canvas.style.height = "100%";
       canvas.style.objectFit = "contain";
       container.appendChild(canvas);
+      if (loadTimerRef.current?.pdf === pdf) loadTimerRef.current.timer.mark("paint");
     });
     return () => { stale = true; };
-    // deck gates mounting of the view that owns the container, and refs
-    // don't trigger effects — re-run once the container actually exists.
-  }, [pdf, displaySlide, role, deck, viewWidth]);
+    // The container comes and goes with the view (and card) that owns it:
+    // render into whichever one is mounted now.
+  }, [pdf, displaySlide, currentCanvasEl, view.width, view.height]);
 
   // Mirror a local state change outward: always to other same-browser windows
   // (BroadcastChannel) and, for synced sessions, to the server (socket). The
@@ -612,6 +659,9 @@ export default function Presentation() {
     [local]
   );
 
+  // Opening a deck isn't presenting it. A few slide changes is the signal
+  // that a talk actually happened, counted once per page.
+  const slideChangesRef = useRef(0);
   const goTo = useCallback(
     (slide: number) => {
       if (slide < 1 || slide > totalSlides) return;
@@ -620,8 +670,9 @@ export default function Presentation() {
         { event: "slide_change", payload: { slideNumber: slide } }
       );
       setCurrentSlide(slide);
+      if (++slideChangesRef.current === 3) track("present", { mode: local ? "local" : "server", slides: totalSlides });
     },
-    [totalSlides, broadcast]
+    [totalSlides, broadcast, local]
   );
 
   const viewerGoTo = useCallback(
@@ -641,6 +692,7 @@ export default function Presentation() {
   const endPresentation = useCallback(async () => {
     if (local) {
       await idbDelete(id!).catch(() => { /* ignore */ });
+      lsRemove(slideKey(id!));
       channelRef.current?.postMessage({ type: "session_ended" });
     } else {
       await endSession(id!);
@@ -1101,6 +1153,7 @@ export default function Presentation() {
         onSynced={() => setLocal(false)}
         onReplacePdf={replacePdf}
         currentCanvasRef={currentCanvasRef}
+        currentCanvasEl={currentCanvasEl}
         blanked={blanked}
         filename={filename}
         deckWatchMode={deckWatchable ? deckWatchMode : null}

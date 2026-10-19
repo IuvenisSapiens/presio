@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { openPdf, destroyPdf } from "@/lib/pdf";
-import { ExternalLink, RefreshCw, X, Zap } from "lucide-react";
+import { ExternalLink, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AccountControl } from "@/components/AccountControl";
@@ -9,6 +9,7 @@ import { PresioLogo } from "@/components/PresioLogo";
 import { GitHubIcon } from "@/components/GitHubIcon";
 import { MobileNotice } from "@/components/MobileNotice";
 import { CodeBlock } from "@/components/CodeBlock";
+import { CopyAgentPromptLink, CustomizeWithAgent } from "@/components/CustomizeWithAgent";
 import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
 import { ConfirmReuploadDialog } from "@/components/controller/ConfirmReuploadDialog";
 import { ConfirmEndDialog } from "@/components/controller/ConfirmEndDialog";
@@ -25,7 +26,6 @@ import { TYPST_PACKAGE_VERSION } from "@/lib/packageVersions";
 import { loadExternalPdfMeta, createExternalSession } from "@/lib/externalSession";
 import { supabase } from "@/lib/supabaseClient";
 import { useAuth } from "@/lib/useAuth";
-import "@/lib/pdf"; // ensure pdf.js worker is configured
 
 const REPO_URL = "https://github.com/benedict-armstrong/presio";
 const TYPST_PACKAGE_URL = "https://github.com/benedict-armstrong/presio-typst-package";
@@ -295,7 +295,9 @@ function DemoReel() {
         <video
           {...shared}
           ref={controllerRef}
-          className="block w-full"
+          width={1280}
+          height={800}
+          className="block h-auto w-full"
           poster={`/demo-controller-${theme}-poster.jpg`}
           src={`/demo-controller-${theme}.mp4`}
           onLoadedMetadata={(e) => resume(e.currentTarget)}
@@ -316,7 +318,9 @@ function DemoReel() {
           <video
             {...shared}
             ref={viewerRef}
-            className="block w-full"
+            width={1280}
+            height={720}
+            className="block h-auto w-full"
             poster={`/demo-viewer-${theme}-poster.jpg`}
             src={`/demo-viewer-${theme}.mp4`}
             onLoadedMetadata={(e) => resume(e.currentTarget)}
@@ -630,6 +634,7 @@ export default function Home() {
         // so assigning a bare { controllerToken } would drop a passphrase.
         setSessionAuth(r.id, { ...getSessionAuth(r.id), controllerToken: r.controllerToken });
       }
+      track("open-recent", { kind: r.kind });
       navigate(`/s/${r.id}?role=controller`);
     },
     [navigate]
@@ -903,7 +908,9 @@ export default function Home() {
         }
         await createDeck({ file, blob, sha256, filename, totalSlides, handle });
       } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : "Upload failed");
+        const message = e instanceof Error ? e.message : "Upload failed";
+        track("upload-error", { error: message });
+        setError(message);
       } finally {
         setUploading(false);
       }
@@ -953,9 +960,12 @@ export default function Home() {
         const meta = await loadExternalPdfMeta(pdfUrl);
         const { data: sessionData } = await supabase.auth.getSession();
         const id = await createExternalSession(meta, sessionData.session?.access_token);
+        track("open-url", { ok: true });
         navigate(`/s/${id}/share`);
       } catch (e: unknown) {
-        setError(e instanceof Error ? e.message : "Failed to create session");
+        const message = e instanceof Error ? e.message : "Failed to create session";
+        track("open-url", { ok: false, error: message });
+        setError(message);
       } finally {
         setUrlBusy(false);
       }
@@ -969,6 +979,7 @@ export default function Home() {
       setExampleError("");
       setExampleBusy(kind);
       try {
+        track("open-example", { kind });
         const url = kind === "typst" ? TYPST_EXAMPLE_PDF_URL : LATEX_EXAMPLE_PDF_URL;
         const meta = await loadExternalPdfMeta(url);
         const { data: sessionData } = await supabase.auth.getSession();
@@ -1055,7 +1066,9 @@ export default function Home() {
   );
 
   useEffect(() => {
-    if (code.length === CODE_LENGTH) navigate(`/s/${code}?role=viewer`);
+    if (code.length !== CODE_LENGTH) return;
+    track("join-code");
+    navigate(`/s/${code}?role=viewer`);
   }, [code, navigate]);
 
   return (
@@ -1091,6 +1104,7 @@ export default function Home() {
         </div>
       </nav>
 
+      <main>
       {/* ---------------------------------------------------------------- hero */}
       <section
         className={
@@ -1135,13 +1149,10 @@ export default function Home() {
                   it's the difference between one drop and thirty. Minimal mode
                   is for people who already know, so it goes with the rest. */}
               {!watchSupported && !minimal && (
-                <div className="mb-3 flex items-start gap-2 rounded-lg border border-muted-foreground/20 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                  <Zap size={14} className="mt-px shrink-0 text-(--home2-accent)" />
-                  <p>
-                    <span className="font-medium text-foreground">Writing your talk?</span> Use
-                    Chrome to enable live hot reload when the slides change on disk.
-                  </p>
-                </div>
+                <p className="mb-3 text-sm text-muted-foreground">
+                  Writing your talk? Use Chrome to enable live hot reload when the slides
+                  change on disk.
+                </p>
               )}
               <div
                 className={`cursor-pointer rounded-xl border-2 border-dashed px-9 py-14 text-center transition-colors ${dragging
@@ -1177,7 +1188,7 @@ export default function Home() {
                       <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
                     </svg>
                     <p className="text-sm text-muted-foreground">Drop a PDF here or click to browse</p>
-                    <p className="mt-1 text-xs text-muted-foreground/70">stays in this browser by default</p>
+                    <p className="mt-1 text-xs text-muted-foreground">stays in this browser by default</p>
                   </>
                 )}
                 <input
@@ -1246,6 +1257,7 @@ export default function Home() {
                     type="text"
                     inputMode="text"
                     maxLength={1}
+                    aria-label={`Session code, character ${i + 1} of ${CODE_LENGTH}`}
                     value={chars[i]}
                     className="h-12 w-10 rounded-md border border-input bg-background text-center font-mono text-lg font-bold uppercase tracking-widest transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--home2-accent)]"
                     onChange={(e) => {
@@ -1359,13 +1371,18 @@ export default function Home() {
                   it stays visible in minimal mode so the explainer can be
                   brought back without clearing storage. The label names what
                   the click does, so it flips with the mode. */}
-              <button
-                type="button"
-                onClick={() => toggleMinimal(!minimal)}
-                className="mt-8 block w-full cursor-pointer rounded-sm text-center text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--home2-accent)]"
-              >
-                {minimal ? "How does Presio work?" : "Hide distractions"}
-              </button>
+              {/* Minimal mode hides the "make it yours" section, so the
+                  plugin prompt gets a quiet entry point of its own here. */}
+              <div className="mt-8 flex flex-wrap items-center justify-center gap-x-6 gap-y-2">
+                {minimal && <CopyAgentPromptLink />}
+                <button
+                  type="button"
+                  onClick={() => toggleMinimal(!minimal)}
+                  className="cursor-pointer rounded-sm text-center text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--home2-accent)]"
+                >
+                  {minimal ? "How does Presio work?" : "Hide distractions"}
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1378,6 +1395,13 @@ export default function Home() {
 
       {!minimal && (
       <>
+      {/* ------------------------------------------------------------ plugins */}
+      <section id="customize" className="px-6 py-24 md:py-28">
+        <ScrollReveal className="mx-auto max-w-6xl">
+          <CustomizeWithAgent />
+        </ScrollReveal>
+      </section>
+
       {/* ---------------------------------------------------------- integrations */}
       <section id="integrations" className="px-6 py-24 md:py-28">
         <ScrollReveal className="mx-auto max-w-6xl">
@@ -1527,6 +1551,7 @@ Hello world.
 
       </>
       )}
+      </main>
 
       <footer className="px-6 py-8">
         <ScrollReveal className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-3 text-xs text-muted-foreground sm:flex-row">

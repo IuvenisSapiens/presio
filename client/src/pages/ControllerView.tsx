@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn, getSessionAuth, setSessionAuth } from "@/lib/utils";
-import { Settings, TriangleAlert, Check, Option, Plus, Share2, ExternalLink, User, LayoutGrid, Puzzle, KeyRound, Keyboard, FileJson } from "lucide-react";
+import { Settings, TriangleAlert, Check, Option, Plus, Share2, ExternalLink, User, Puzzle, KeyRound, Keyboard, FileJson, Search, Compass, SunMoon, Sun, Moon, Monitor } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import { buttonVariants } from "@/components/ui/button-variants";
 import { DialogOverlay } from "@/components/ui/dialog-overlay";
 import { CopyField } from "@/components/CopyField";
-import { ThemeToggle } from "@/components/ThemeToggle";
 import { LoginDialog } from "@/components/LoginDialog";
 import { AccountControl } from "@/components/AccountControl";
 import { ControllerOnboarding } from "@/components/ControllerOnboarding";
@@ -34,6 +34,7 @@ import { useJoinUrls } from "@/lib/joinUrl";
 import { ConfirmReplaceDialog } from "@/components/controller/ConfirmReplaceDialog";
 import { useIsLandscape, useIsMobile } from "@/hooks/useIsMobile";
 import { useSlideTapNav } from "@/hooks/useSlideTapNav";
+import { useTouchPresenting } from "@/hooks/useTouchPresenting";
 import {
   isDeckWatchSupported,
   PDF_PICKER_OPTIONS,
@@ -60,19 +61,25 @@ import {
   addLeaf,
   removeLeaf,
   restrictLayout,
-  pluginTileKey,
+  pluginPanelKey,
   visibleKeys,
 } from "@/lib/controllerLayout";
 import { lsGetString, lsSetString, viewerOpenedKey } from "@/lib/storage";
 import { type MosaicNode } from "react-mosaic-component";
 import type { Deck } from "@/lib/deck";
 import type { PluginHostState } from "@/lib/plugins/usePluginHost";
-import { PluginBackgrounds, PluginButtons, PluginTile } from "@/components/plugins/PresenterPlugins";
+import { PluginBackgrounds, PluginButtons, PluginPanel, PluginStatusItems } from "@/components/plugins/PresenterPlugins";
+import { usePluginPaletteItems } from "@/components/plugins/pluginCommands";
+import { CommandPalette } from "@/components/CommandPalette";
+import { useControllerCommands, goToSlideItems } from "@/components/controller/controllerCommands";
+import { appPaletteItems, useAppCommands } from "@/lib/commands";
+import { useTheme } from "@/lib/useTheme";
 import { SettingsFileSection } from "@/components/SettingsFileSection";
 import { SettingsDialog } from "@/components/controller/SettingsDialog";
-import { AddPluginPage, PluginPage } from "@/components/plugins/PluginSettings";
+import { AddPluginPage, DiscoverPluginsPage, PluginPage } from "@/components/plugins/PluginSettings";
 import { pluginLabel, useInstalledPlugins } from "@/lib/plugins/installed";
-import type { PluginManifest } from "@/lib/plugins/manifest";
+import { findCommand, type LoadedPlugin } from "@/lib/plugins/manifest";
+import { track } from "@/lib/analytics";
 
 // How long a pending "j<number>" jump waits for another digit before it
 // commits on its own. Long enough to type a second digit, short enough that the
@@ -92,6 +99,8 @@ interface ControllerViewProps {
   onSynced: () => void;
   onReplacePdf: (file: File, handle?: FileSystemFileHandle) => Promise<void>;
   currentCanvasRef: React.RefObject<HTMLDivElement | null>;
+  /** The element that ref is on now (a layout change replaces it). */
+  currentCanvasEl: HTMLDivElement | null;
   blanked: boolean;
   onBlankToggle: () => void;
   /** The deck on screen, shown in the header's deck control. */
@@ -108,8 +117,8 @@ interface ControllerViewProps {
   plugins: PluginHostState;
 }
 
-/** The Settings page for an installed plugin, by its URL. */
-const pluginPageId = (url: string) => `plugin:${url}`;
+/** The Settings page for an installed plugin, by its registry key (its source). */
+const pluginPageId = (key: string) => `plugin:${key}`;
 
 export function ControllerView({
   id,
@@ -122,6 +131,7 @@ export function ControllerView({
   onSynced,
   onReplacePdf,
   currentCanvasRef,
+  currentCanvasEl,
   blanked,
   onBlankToggle,
   filename,
@@ -158,6 +168,8 @@ export function ControllerView({
   const [loginOpen, setLoginOpen] = useState(false);
   // Mobile-only surfaces.
   const [menuOpen, setMenuOpen] = useState(false);
+  // The command palette (⌘K, or the header's search button).
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [passphraseDialogOpen, setPassphraseDialogOpen] = useState(false);
   // First-run tutorial for the controller. Shown before the viewer prompt.
   const [onboardingOpen, setOnboardingOpen] = useState(() => !hasCompletedControllerOnboarding());
@@ -249,13 +261,21 @@ export function ControllerView({
     !isMobile &&
     !onboardingOpen &&
     lsGetString(viewerOpenedKey(id)) !== "true";
+  // Waving the prompt away answers it for this presentation too, so it does
+  // not come back on reload.
+  const dismissViewerPrompt = () => {
+    lsSetString(viewerOpenedKey(id), "true");
+    setViewerPromptDismissed(true);
+  };
 
   // Tap the left/right half of the current slide to go back/forward on touch
   // devices. Disabled while pinch-zoom is active so panning or lifting
   // fingers off a zoomed slide never flips pages. (A plugin layer taking the
   // slide's input — a drawing tool — gets the taps instead.)
   const [slideZoomActive, setSlideZoomActive] = useState(false);
-  useSlideTapNav(currentCanvasRef, {
+  // On a touch screen only the slide zooms, never the page.
+  useTouchPresenting();
+  useSlideTapNav(currentCanvasEl, {
     enabled: !slideZoomActive,
     onPrev: () => onGoTo(currentSlide - 1),
     onNext: () => onGoTo(currentSlide + 1),
@@ -317,11 +337,18 @@ export function ControllerView({
   useEffect(() => cancelJump, [cancelJump]);
 
   const { host: pluginHost, plugins: runningPlugins } = plugins;
-  // Plugins show the presenter's keys in their tooltips (presio.shortcut).
+  // Plugins show the presenter's keys in their tooltips (presio.commands.shortcut).
   useEffect(() => pluginHost.setKeymap(keymap), [pluginHost, keymap]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // ⌘K / Ctrl+K: the command palette, from anywhere (a field included).
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        cancelJump();
+        setPaletteOpen((open) => !open);
+        return;
+      }
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -363,7 +390,7 @@ export function ControllerView({
       } else if (!e.repeat) {
         // Plugins' keybindings, after Presio's own: a key both claim is ours.
         for (const plugin of runningPlugins) {
-          const { id: pluginId, contributes } = plugin.manifest;
+          const { id: pluginId, manifest: { contributes } } = plugin;
           const hit = contributes.keybindings.find((kb) => matchesBinding(e, pluginBindings(keymap, pluginId, kb)));
           if (hit) {
             e.preventDefault();
@@ -486,32 +513,42 @@ export function ControllerView({
     const features = "popup,width=1280,height=800";
     const w = window.open(viewerUrl, `presio-viewer-${id}`, features);
     setViewerBlocked(!w);
-    if (w) {
-      lsSetString(viewerOpenedKey(id), "true");
-      setViewerPromptDismissed(true);
-    }
+    track("open-viewer", { blocked: !w });
+    if (w) dismissViewerPrompt();
   };
 
   // Dashboard card content + optional toolbar action for each key.
-  // Running plugins that contribute a dashboard tile, and every card the
+  // Running plugins' panels (a card each), and every card the
   // Layout settings can toggle.
-  const tilePlugins = plugins.plugins.filter((p) => p.manifest.surfaces.includes("tile"));
+  const panels = plugins.plugins.flatMap((plugin) =>
+    plugin.manifest.contributes.panels.map((panel) => ({ plugin, panel, key: pluginPanelKey(plugin.id, panel.id) }))
+  );
   const pluginErrors = useMemo(() => ({ ...plugins.errors, ...plugins.viewerErrors }), [plugins.errors, plugins.viewerErrors]);
   const installedPlugins = useInstalledPlugins(pluginErrors);
   // A plugin some viewers couldn't load: worth a look, but only in Settings.
-  const viewerFailedUrl = Object.keys(plugins.viewerErrors)[0];
+  const viewerFailedKey = Object.keys(plugins.viewerErrors)[0];
   // Enabled plugins' shortcuts in order: an earlier one wins a shared key.
-  const pluginShortcuts = installedPlugins.flatMap(({ entry, manifest }) =>
-    entry.enabled && manifest ? [{ id: manifest.id, name: manifest.name, keybindings: manifest.contributes.keybindings }] : []
+  const pluginShortcuts = installedPlugins.flatMap(({ entry, plugin }) =>
+    entry.enabled && plugin
+      ? [{
+          id: plugin.id,
+          name: plugin.manifest.displayName,
+          keybindings: plugin.manifest.contributes.keybindings.map((kb) => ({
+            ...kb,
+            label: findCommand(plugin.manifest, kb.command)?.title ?? kb.command,
+          })),
+        }]
+      : []
   );
-  // Switching on a plugin with a tile is asking to see it.
-  const showPluginTile = (manifest: PluginManifest) => {
-    const key = pluginTileKey(manifest.id);
-    if (manifest.surfaces.includes("tile") && !visible.has(key)) toggleCard(key);
+  // Switching on a plugin with panels is asking to see them.
+  const showPluginPanels = (plugin: LoadedPlugin) => {
+    for (const panel of plugin.manifest.contributes.panels) {
+      const key = pluginPanelKey(plugin.id, panel.id);
+      if (!visible.has(key)) toggleCard(key);
+    }
   };
-  const layoutKeys = [...CARD_KEYS, ...tilePlugins.map((p) => pluginTileKey(p.manifest.id))];
-  const cardLabel = (key: string) =>
-    CARD_LABELS[key] ?? tilePlugins.find((p) => pluginTileKey(p.manifest.id) === key)?.manifest.name ?? key;
+  const layoutKeys = [...CARD_KEYS, ...panels.map((p) => p.key)];
+  const cardLabel = (key: string) => CARD_LABELS[key] ?? panels.find((p) => p.key === key)?.panel.title ?? key;
 
   const cardContent: Record<string, CardEntry> = {
     currentSlide: {
@@ -534,11 +571,11 @@ export function ControllerView({
     thumbnails: {
       content: <ThumbnailsCard deck={deck} currentSlide={currentSlide} onGoTo={onGoTo} plugins={plugins} />,
     },
-    // Each running plugin with a tile surface gets a card of its own.
+    // Each panel a running plugin contributes gets a card of its own.
     ...Object.fromEntries(
-      tilePlugins.map((plugin) => [
-        pluginTileKey(plugin.manifest.id),
-        { title: plugin.manifest.name, content: <PluginTile host={plugins.host} plugin={plugin} /> },
+      panels.map(({ plugin, panel, key }) => [
+        key,
+        { title: panel.title, content: <PluginPanel host={plugins.host} plugin={plugin} panel={panel.id} /> },
       ])
     ),
   };
@@ -546,16 +583,65 @@ export function ControllerView({
   // off, or still loading); draw only what exists.
   const shownMosaic = restrictLayout(mosaic, Object.keys(cardContent));
 
+  // Everything the palette lists: Presio's commands, then the plugins'.
+  const { theme, setTheme } = useTheme();
+  const appCommands = useControllerCommands(
+    {
+      currentSlide,
+      totalSlides,
+      local,
+      blanked,
+      isMobile,
+      keymap,
+      theme,
+      canSharePassphrase,
+      cards: layoutKeys.map((key) => ({ key, label: cardLabel(key), shown: visible.has(key) })),
+      pluginPages: installedPlugins.map((plugin) => ({ id: pluginPageId(plugin.entry.key), label: pluginLabel(plugin) })),
+    },
+    {
+      goTo: onGoTo,
+      toggleBlank: onBlankToggle,
+      syncAll: onSyncAll,
+      share: () => setShareDialogOpen(true),
+      showPassphrase: () => {
+        setPassphraseDialogOpen(true);
+        void requestPassphrase();
+      },
+      openViewer,
+      switchToViewer: () => navigate(`/s/${id}?role=viewer`, { replace: true }),
+      replaceDeck: openReplacePicker,
+      openSettings: (page) => {
+        if (page) setSettingsCategory(page);
+        setSettingsOpen(true);
+      },
+      toggleCard,
+      setTheme,
+      end: () => setConfirmEnd(true),
+    }
+  );
+  useAppCommands(pluginHost, appCommands);
+  const pluginPaletteItems = usePluginPaletteItems(pluginHost, runningPlugins, keymap);
+
   const desktopActions = (
     <>
-      {viewerFailedUrl && (
+      <button
+        type="button"
+        onClick={() => setPaletteOpen(true)}
+        title={`Commands (${isMac ? "⌘K" : "Ctrl+K"})`}
+        data-testid="open-command-palette"
+        className="inline-flex items-center justify-center gap-1.5 h-8 min-w-8 px-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
+      >
+        <Search size={15} />
+        <kbd className="hidden xl:inline font-sans text-[11px] font-medium">{isMac ? "⌘K" : "Ctrl K"}</kbd>
+      </button>
+      {viewerFailedKey && (
         <button
           type="button"
           onClick={() => {
-            setSettingsCategory(pluginPageId(viewerFailedUrl));
+            setSettingsCategory(pluginPageId(viewerFailedKey));
             setSettingsOpen(true);
           }}
-          title={plugins.viewerErrors[viewerFailedUrl]}
+          title={plugins.viewerErrors[viewerFailedKey]}
           data-testid="plugin-viewer-errors"
           className="inline-flex items-center justify-center h-8 w-8 rounded-md text-amber-500 hover:bg-amber-500/10 transition-colors"
         >
@@ -570,7 +656,6 @@ export function ControllerView({
       >
         <Settings size={15} />
       </button>
-      <ThemeToggle />
       <span className="text-muted-foreground/40">|</span>
       <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-foreground" onClick={() => setShareDialogOpen(true)}>
         Share
@@ -607,6 +692,7 @@ export function ControllerView({
       onEndClick={() => setConfirmEnd(true)}
       onSettings={() => setSettingsOpen(true)}
       onOpenViewer={isMobile ? undefined : openViewer}
+      onCommands={() => setPaletteOpen(true)}
     />
   );
 
@@ -636,6 +722,8 @@ export function ControllerView({
         onDeckWatchResume={onDeckWatchResume}
         remoteDeckUpdate={remoteDeckUpdate}
         onRemoteDeckApply={onRemoteDeckApply}
+        onCodeClick={() => setShareDialogOpen(true)}
+        status={<PluginStatusItems host={plugins.host} plugins={plugins.plugins} compact={isMobile} />}
         actions={isMobile || narrow ? menuActions : desktopActions}
       />
 
@@ -743,11 +831,33 @@ export function ControllerView({
               : []),
             {
               id: "layout",
-              label: "Layout",
-              icon: LayoutGrid,
-              description: "Which cards the dashboard shows, and how they're arranged.",
+              label: "Appearance",
+              icon: SunMoon,
+              description: "The theme, and which cards the dashboard shows and how they're arranged.",
               content: (
                 <div className="space-y-2">
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground">Theme</p>
+                    <ButtonGroup>
+                      {([
+                        ["system", "System", Monitor],
+                        ["light", "Light", Sun],
+                        ["dark", "Dark", Moon],
+                      ] as const).map(([value, label, Icon]) => (
+                        <Button
+                          key={value}
+                          size="sm"
+                          variant={theme === value ? "secondary" : "outline"}
+                          aria-pressed={theme === value}
+                          onClick={() => setTheme(value)}
+                        >
+                          <Icon size={14} className="mr-1.5" />
+                          {label}
+                        </Button>
+                      ))}
+                    </ButtonGroup>
+                  </div>
+                  <p className="pt-2 text-xs font-medium text-muted-foreground">Dashboard cards</p>
                   <div className="space-y-0.5">
                     {layoutKeys.map((key) => (
                       <button
@@ -865,21 +975,37 @@ export function ControllerView({
               description: "All of these settings, plugins' included, as one settings.json — to back up or use in another browser.",
               content: <SettingsFileSection />,
             },
-            // One page per installed plugin, then one to add another.
+            // A page to discover plugins, one per installed plugin, then one to add another.
+            {
+              id: "discover-plugins",
+              group: "Plugins",
+              label: "Discover plugins",
+              icon: Compass,
+              description:
+                "Published on GitHub by anyone. Only add plugins you trust.",
+              content: (
+                <DiscoverPluginsPage
+                  onAdded={(key, plugin) => {
+                    showPluginPanels(plugin);
+                    setSettingsCategory(pluginPageId(key));
+                  }}
+                />
+              ),
+            },
             ...installedPlugins.map((plugin) => ({
-              id: pluginPageId(plugin.entry.url),
+              id: pluginPageId(plugin.entry.key),
               group: "Plugins",
               label: pluginLabel(plugin),
               icon: Puzzle,
               dimmed: !plugin.entry.enabled,
-              description: plugin.manifest?.description,
+              description: plugin.plugin?.manifest.description,
               content: (
                 <PluginPage
                   plugin={plugin}
                   host={plugins.host}
-                  running={plugins.plugins.find((p) => p.url === plugin.entry.url)}
-                  onEnabled={showPluginTile}
-                  shortcutsBefore={pluginShortcuts.slice(0, Math.max(0, pluginShortcuts.findIndex((p) => p.id === plugin.manifest?.id)))}
+                  running={plugins.plugins.find((p) => p.key === plugin.entry.key)}
+                  onEnabled={showPluginPanels}
+                  shortcutsBefore={pluginShortcuts.slice(0, Math.max(0, pluginShortcuts.findIndex((p) => p.id === plugin.plugin?.id)))}
                 />
               ),
             })),
@@ -889,17 +1015,26 @@ export function ControllerView({
               label: "Add plugin",
               icon: Plus,
               description:
-                "Load a plugin from its URL — its own site, or your dev server while you build one. Plugins can do anything Presio can, so only add ones you trust.",
+                "From GitHub or a URL. Only add plugins you trust.",
               content: (
                 <AddPluginPage
-                  onAdded={(url, manifest) => {
-                    showPluginTile(manifest);
-                    setSettingsCategory(pluginPageId(url));
+                  onDiscover={() => setSettingsCategory("discover-plugins")}
+                  onAdded={(key, plugin) => {
+                    showPluginPanels(plugin);
+                    setSettingsCategory(pluginPageId(key));
                   }}
                 />
               ),
             },
           ]}
+        />
+      )}
+
+      {paletteOpen && (
+        <CommandPalette
+          items={[...appPaletteItems(appCommands), ...pluginPaletteItems]}
+          extraItems={(query) => goToSlideItems(query, totalSlides, onGoTo)}
+          onClose={() => setPaletteOpen(false)}
         />
       )}
 
@@ -955,7 +1090,7 @@ export function ControllerView({
       )}
 
       {!isMobile && viewerPromptOpen && (
-        <DialogOverlay onClose={() => setViewerPromptDismissed(true)}>
+        <DialogOverlay onClose={dismissViewerPrompt}>
           <div className="flex flex-col items-center gap-4 text-center">
             <p className="text-xs text-muted-foreground">
               Hold <span className="font-medium text-foreground">{isMac ? "⌥ Option" : "Option/Alt"}</span> and click to open it in its own window.
@@ -978,7 +1113,7 @@ export function ControllerView({
             </div>
             <button
               type="button"
-              onClick={() => setViewerPromptDismissed(true)}
+              onClick={dismissViewerPrompt}
               className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-4 mt-2"
             >
               Not now
