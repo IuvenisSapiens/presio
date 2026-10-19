@@ -37,11 +37,19 @@ export const STORAGE_KEYS = {
 export const pluginStateKey = (id: string) => `presio_plugin_state_${id}`;
 /** The presenter's retained plugin messages for one session (lib/plugins/host.ts). */
 export const pluginRetainedKey = (id: string) => `presio_plugin_retained_${id}`;
+/** The presenter's copy of viewers' input to plugins for one session (presio.audience). */
+export const pluginAudienceKey = (id: string) => `presio_plugin_audience_${id}`;
+/** This browser's anonymous viewer id for one session (presio.audience). */
+export const audienceViewerKey = (id: string) => `presio_audience_viewer_${id}`;
 export const sessionKey = (id: string) => `session_${id}`;
 /** Live-reload preference for a local deck: "off" | "prompt" | "auto". A device
  *  preference (the file being watched is on this machine), not session state. */
 export const deckWatchKey = (id: string) => `presio_deck_watch_${id}`;
+/** Set once the "Open viewer" prompt is answered for a deck (opened or dismissed). */
 export const viewerOpenedKey = (id: string) => `presio_viewer_opened_${id}`;
+/** The slide a local deck's controller is on, so a reload stays there. (A
+ *  synced deck's is on the server.) */
+export const slideKey = (id: string) => `presio_slide_${id}`;
 
 /** Read and JSON-parse a value, returning `fallback` if absent or malformed. */
 export function lsGet<T>(key: string, fallback: T): T {
@@ -98,7 +106,7 @@ export function lsRemove(key: string): void {
  *  reappearing, mid-presentation). */
 export function rekeySessionStorage(oldId: string, newId: string): void {
   if (oldId === newId) return;
-  for (const key of [pluginRetainedKey, pluginStateKey, viewerOpenedKey]) {
+  for (const key of [pluginRetainedKey, pluginStateKey, pluginAudienceKey, viewerOpenedKey]) {
     const value = lsGetString(key(oldId), "");
     if (value) lsSetString(key(newId), value);
     lsRemove(key(oldId));

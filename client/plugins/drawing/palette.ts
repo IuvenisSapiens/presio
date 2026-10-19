@@ -9,9 +9,8 @@
 // it); and with the mouse off the slide altogether it fades out. It keeps its
 // size and place on screen when the presenter pinches in.
 //
-// The eraser and the lasso only show once they're wanted (a pen was used, or
-// the "Advanced tools" setting): the palette starts with the few tools most
-// talks need.
+// The eraser and the lasso show with the "Advanced tools" setting (on by
+// default); turned off, the palette keeps to the few tools most talks need.
 
 import { icon } from "./icons";
 import type { Tool } from "./model";
@@ -26,7 +25,7 @@ const COLLAPSE_DELAY_MS = 700;
 
 // A tooltip with the presenter's key for the command, if they have one.
 const withKey = (label: string, command: string) => {
-  const key = presio.shortcut(command);
+  const key = presio.commands.shortcut(command);
   return key ? `${label} (${key})` : label;
 };
 
@@ -63,9 +62,9 @@ export interface PaletteActions {
   laserModes(): boolean;
   /** Whether the eraser and lasso show. */
   advanced(): boolean;
-  /** Pencil mode (only a pen draws), or null while no pen has been seen. */
-  pencil(): boolean | null;
-  setPencil(on: boolean): void;
+  /** Whether only a pen draws (one has been seen here): it always has a
+   *  tool then, so there's no "pointer" to pick. */
+  penOnly(): boolean;
   /** Whether the drawings are hidden, on every screen. */
   hidden(): boolean;
   setHidden(hidden: boolean): void;
@@ -103,7 +102,7 @@ export class Palette {
   constructor(parent: HTMLElement, actions: PaletteActions) {
     this.actions = actions;
     this.el.className = "palette";
-    // A finger works it even while fingers are otherwise the slide's (pencil mode).
+    // A finger works it even while fingers are otherwise the slide's (only a pen draws).
     this.el.dataset.control = "";
     this.tools.className = "panel tools";
     this.el.append(this.tools);
@@ -215,24 +214,13 @@ export class Palette {
     };
 
     const advanced = this.actions.advanced();
-    const pencil = this.actions.pencil();
+    const penOnly = this.actions.penOnly();
     const hidden = this.actions.hidden();
     const buttons = expanded
       ? [
-          ...TOOLS.filter((t) => !t.advanced || advanced || t.key === tool).map((t) =>
+          ...TOOLS.filter((t) => (!t.advanced || advanced || t.key === tool) && !(penOnly && t.key === "none")).map((t) =>
             this.button(t.icon, withKey(t.label, t.key === "none" ? "pointer" : t.key), `tool-${t.key}`, () => this.select(t.key), tool === t.key)
           ),
-          ...(pencil === null
-            ? []
-            : [
-                this.button(
-                  pencil ? "penTool" : "hand",
-                  pencil ? "Pencil only: fingers pan and zoom. Tap to draw with fingers too" : "Pencil and fingers draw. Tap for pencil only",
-                  "pencil-mode",
-                  () => this.actions.setPencil(!pencil),
-                  pencil
-                ),
-              ]),
           this.button(
             hidden ? "eyeOff" : "eye",
             withKey(hidden ? "Drawings hidden on every screen: tap to show them" : "Hide the drawings on every screen", "toggleDrawings"),

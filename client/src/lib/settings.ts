@@ -4,7 +4,7 @@
 // from the defaults, so an exported file reads as "what this presenter
 // changed". Presio's own settings are declared in CORE_SETTINGS below; plugins
 // contribute theirs through their manifest, namespaced by plugin id
-// ("join-code.showUrl"). Values are validated on the way out, never trusted on
+// ("presio/join-code.showUrl"). Values are validated on the way out, never trusted on
 // the way in: an imported or hand-edited document can hold anything, and a bad
 // value reads back as the default rather than breaking the app.
 //
@@ -19,35 +19,10 @@ import { DEFAULT_KEYMAP, KEYMAP_ACTIONS, type KeyBinding, type Keymap } from "./
 
 // --- Schema ---
 
-/** How a setting is declared — by Presio here, and by plugins in their
- *  manifest's `contributes.settings` (which may not use "object"). */
-export type SettingSpec =
-  | { type: "boolean"; default: boolean; description?: string }
-  | { type: "number"; default: number | null; minimum?: number; maximum?: number; description?: string }
-  | { type: "string"; default: string; maxLength?: number; description?: string }
-  | { type: "enum"; default: string; values: string[]; labels?: string[]; description?: string }
-  | { type: "object"; default: unknown; description?: string };
-
-/** Coerce a stored value to a spec, or undefined when it doesn't fit. */
-export function sanitizeSettingValue(spec: SettingSpec, raw: unknown): unknown {
-  switch (spec.type) {
-    case "boolean":
-      return typeof raw === "boolean" ? raw : undefined;
-    case "number":
-      if (raw === null && spec.default === null) return null;
-      if (typeof raw !== "number" || !Number.isFinite(raw)) return undefined;
-      if (spec.minimum !== undefined && raw < spec.minimum) return undefined;
-      if (spec.maximum !== undefined && raw > spec.maximum) return undefined;
-      return raw;
-    case "string":
-      if (typeof raw !== "string") return undefined;
-      return raw.length <= (spec.maxLength ?? 1000) ? raw : undefined;
-    case "enum":
-      return typeof raw === "string" && spec.values.includes(raw) ? raw : undefined;
-    case "object":
-      return raw;
-  }
-}
+// How a setting is declared and checked; plugins declare theirs the same way.
+import { sanitizeSettingValue, type SettingSpec } from "@shared/plugin/settings";
+import { PLUGIN_ID_RE, qualify, splitQualified } from "@shared/plugin/sources";
+export { sanitizeSettingValue, type SettingSpec };
 
 type CoreSpec<T> = SettingSpec & {
   default: T;
@@ -63,7 +38,10 @@ export interface CoreSettings {
   "share.lanAddress": string;
   "home.minimal": boolean;
   "layout.forceDesktop": boolean;
-  plugins: Record<string, { enabled: boolean }>;
+  /** By source without its version (shared/plugin/sources.ts): whether it's
+   *  on, where it loads from, the id it has and the version it's on (a tag,
+   *  a branch or a commit). Built-ins appear only once toggled. */
+  plugins: Record<string, { enabled: boolean; url?: string; id?: string; ref?: string }>;
 }
 
 export type CoreSettingKey = keyof CoreSettings;
@@ -71,16 +49,21 @@ export type CoreSettingKey = keyof CoreSettings;
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 
-const PLUGIN_COMMAND_RE = /^[a-z0-9][a-z0-9-]{0,63}\.[A-Za-z][A-Za-z0-9_]{0,63}$/;
+/** "<plugin id>.<command>": a plugin command's bindings. */
+const isPluginCommandKey = (key: string) => {
+  const parts = splitQualified(key);
+  return !!parts && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(parts.name);
+};
 
 function sanitizeKeymap(raw: unknown): Keymap | undefined {
   if (!isRecord(raw)) return undefined;
   const isBinding = (b: unknown): b is KeyBinding =>
-    isRecord(b) && typeof b.key === "string" && b.key.length > 0 && (b.meta === undefined || typeof b.meta === "boolean");
+    isRecord(b) && typeof b.key === "string" && b.key.length > 0 && (b.meta === undefined || typeof b.meta === "boolean") && (b.shift === undefined || typeof b.shift === "boolean");
   // Merged over the defaults, so a map saved before an action existed still
   // binds it.
   const km: Keymap = { ...DEFAULT_KEYMAP };
-  const clean = (list: KeyBinding[]) => list.map((b) => (b.meta ? { key: b.key, meta: true } : { key: b.key }));
+  const clean = (list: KeyBinding[]) =>
+    list.map((b): KeyBinding => ({ key: b.key, ...(b.meta && { meta: true }), ...(b.shift && { shift: true }) }));
   for (const action of KEYMAP_ACTIONS) {
     const list = raw[action];
     if (Array.isArray(list) && list.every(isBinding)) km[action] = clean(list);
@@ -88,7 +71,7 @@ function sanitizeKeymap(raw: unknown): Keymap | undefined {
   // Plugins' commands, kept whether or not the plugin is installed here (like
   // their settings), so an imported file doesn't lose them.
   for (const [key, list] of Object.entries(raw)) {
-    if (PLUGIN_COMMAND_RE.test(key) && Array.isArray(list) && list.length <= 3 && list.every(isBinding)) km[key] = clean(list);
+    if (isPluginCommandKey(key) && Array.isArray(list) && list.length <= 3 && list.every(isBinding)) km[key] = clean(list);
   }
   return km;
 }
@@ -96,8 +79,12 @@ function sanitizeKeymap(raw: unknown): Keymap | undefined {
 function sanitizePluginList(raw: unknown): CoreSettings["plugins"] | undefined {
   if (!isRecord(raw)) return undefined;
   const out: CoreSettings["plugins"] = {};
-  for (const [url, entry] of Object.entries(raw)) {
-    if (isRecord(entry) && typeof entry.enabled === "boolean") out[url] = { enabled: entry.enabled };
+  for (const [key, entry] of Object.entries(raw)) {
+    if (!isRecord(entry) || typeof entry.enabled !== "boolean" || key.length > 2048) continue;
+    const url = typeof entry.url === "string" && /^(\/plugins\/|https?:\/\/)/.test(entry.url) ? entry.url : undefined;
+    const id = typeof entry.id === "string" && PLUGIN_ID_RE.test(entry.id) ? entry.id : undefined;
+    const ref = typeof entry.ref === "string" && /^[^\s/]{1,200}$/.test(entry.ref) ? entry.ref : undefined;
+    out[key] = { enabled: entry.enabled, ...(url && { url }), ...(id && { id }), ...(ref && { ref }) };
   }
   return out;
 }
@@ -113,7 +100,7 @@ export const CORE_SETTINGS: { [K in CoreSettingKey]: CoreSpec<CoreSettings[K]> }
     type: "object",
     default: DEFAULT_KEYMAP,
     sanitize: sanitizeKeymap,
-    description: "Controller keyboard shortcuts, per action (or \"<plugin id>.<command>\" for a plugin's): a list of { key, meta? }.",
+    description: "Controller keyboard shortcuts, per action (or \"<plugin id>.<command>\" for a plugin's): a list of { key, meta?, shift? }.",
   },
   "share.lanAddress": {
     type: "string",
@@ -135,15 +122,9 @@ export const CORE_SETTINGS: { [K in CoreSettingKey]: CoreSpec<CoreSettings[K]> }
     type: "object",
     default: {},
     sanitize: sanitizePluginList,
-    description: "Added plugins by URL, and which plugins are enabled.",
+    description: "Plugins by source (\"presio/timer\", \"github:owner/repo\", a URL): { enabled, url, id, ref }, ref being the tag, branch or commit it's on.",
   },
 };
-
-/** Top-level sections Presio uses; plugin ids may not take these names. */
-export const RESERVED_SETTING_SECTIONS = new Set([
-  "presio",
-  ...Object.keys(CORE_SETTINGS).map((key) => key.split(".")[0]),
-]);
 
 // --- Store ---
 
@@ -244,7 +225,7 @@ export function resolvePluginSettings(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [name, spec] of Object.entries(specs)) {
-    const raw = source[`${pluginId}.${name}`];
+    const raw = source[qualify(pluginId, name)];
     const value = raw === undefined ? undefined : sanitizeSettingValue(spec, raw);
     out[name] = value === undefined ? spec.default : value;
   }
@@ -252,7 +233,7 @@ export function resolvePluginSettings(
 }
 
 export function setPluginSetting(pluginId: string, name: string, spec: SettingSpec, value: unknown) {
-  const key = `${pluginId}.${name}`;
+  const key = qualify(pluginId, name);
   if (sameValue(value, spec.default)) setRawSetting(key, undefined);
   else if (sanitizeSettingValue(spec, value) !== undefined) setRawSetting(key, value);
 }
@@ -318,18 +299,18 @@ function migrateLegacySettings(): Doc {
   // specs, so anything off is dropped there.
   const timer = json("presio_timer_settings");
   if (isRecord(timer)) {
-    if (timer.mode === "down") out["timer.mode"] = "down";
-    for (const [from, to] of [["duration", "timer.durationMinutes"], ["threshold", "timer.warningMinutes"]]) {
+    if (timer.mode === "down") out["presio/timer.mode"] = "down";
+    for (const [from, to] of [["duration", "presio/timer.durationMinutes"], ["threshold", "presio/timer.warningMinutes"]]) {
       const seconds = timer[from];
       if (typeof seconds === "number" && seconds > 0) out[to] = seconds / 60;
     }
   }
-  if (read("presio_timer_show_clock") === "true") out["timer.showClock"] = true;
+  if (read("presio_timer_show_clock") === "true") out["presio/timer.showClock"] = true;
   // Likewise the notes plugin's text size.
   const notesScale = json("presio_notes_font_scale");
-  if (typeof notesScale === "number" && notesScale !== 1) out["notes.fontScale"] = notesScale;
+  if (typeof notesScale === "number" && notesScale !== 1) out["presio/notes.fontScale"] = notesScale;
   // And drawing's: the palette's visibility, and each tool's color and width.
-  if (read("presio_annotation_toolbar") === "false") out["drawing.toolbar"] = false;
+  if (read("presio_annotation_toolbar") === "false") out["presio/drawing.toolbar"] = false;
   Object.assign(out, drawingStyle("pen", json("presio_pen_style")), drawingStyle("highlighter", json("presio_highlighter_style")));
   put("share.lanAddress", read("presio_lan_address") ?? undefined);
   put("home.minimal", json("presio_home_minimal"));
@@ -356,9 +337,9 @@ function drawingStyle(tool: "pen" | "highlighter", raw: unknown): Doc {
   // the document leaves out.
   const defaults = tool === "pen" ? { color: "#e11d48", size: 3 } : { color: "#facc15", size: 14 };
   const color = typeof raw.color === "string" && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color.toLowerCase() : null;
-  if (color && color !== defaults.color) out[`drawing.${tool}Color`] = color;
+  if (color && color !== defaults.color) out[`presio/drawing.${tool}Color`] = color;
   const size = typeof raw.size === "number" && Number.isFinite(raw.size) && raw.size > 0 ? Math.round(raw.size * 960 * 10) / 10 : null;
-  if (size !== null && size !== defaults.size) out[`drawing.${tool}Size`] = size;
+  if (size !== null && size !== defaults.size) out[`presio/drawing.${tool}Size`] = size;
   return out;
 }
 

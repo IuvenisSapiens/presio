@@ -5,6 +5,7 @@ import { loadPdfData, renderPage, destroyPdf } from "@/lib/pdf";
 import { setSlideNotes } from "@/lib/notesAttach";
 import { removeAttachments } from "@/lib/removeAttachments";
 import { inspectAttachments, type DeckReport } from "@/lib/inspectAttachments";
+import { attachmentMime } from "@shared/attachments";
 import { idbPut } from "@/lib/localStore";
 import { newLocalDeckId } from "@/lib/localId";
 import { PresioLogo } from "@/components/PresioLogo";
@@ -13,6 +14,7 @@ import { ValidityBadge, ValidityDot } from "./ValidityBadge";
 import { PageDetailModal } from "./PageDetailModal";
 import "@/lib/pdf"; // ensure worker is configured
 import { saveFile } from "@/lib/saveFile";
+import { track } from "@/lib/analytics";
 
 type PageModalState = { page: number; tab: "notes" | "media" } | null;
 
@@ -61,6 +63,7 @@ export default function CheckerPage() {
       pdfRef.current = pdf;
 
       const deck = await inspectAttachments(pdf);
+      track("check", { slides: pdf.numPages });
       setReport(deck);
       setFilename(file.name);
 
@@ -415,7 +418,7 @@ export default function CheckerPage() {
               {/* Orphans */}
               {report.orphans.length > 0 && (
                 <div className="mt-8 space-y-2">
-                  <h2 className="text-sm font-medium">Unattached files ({report.orphans.length})</h2>
+                  <h2 className="text-sm font-medium">Other files ({report.orphans.length})</h2>
                   {report.orphans.map((a, i) => (
                     <div key={i} className="flex items-center gap-2">
                       <ValidityBadge validity={a.validity} />
@@ -431,7 +434,7 @@ export default function CheckerPage() {
                             window.open(url, "_blank", "noopener,noreferrer");
                             setTimeout(() => URL.revokeObjectURL(url), 30_000);
                           } else {
-                            const blob = new Blob([a.content.slice()], { type: "application/json" });
+                            const blob = new Blob([a.content.slice()], { type: attachmentMime(a.filename) ?? "text/plain" });
                             const url = URL.createObjectURL(blob);
                             window.open(url, "_blank", "noopener,noreferrer");
                             setTimeout(() => URL.revokeObjectURL(url), 30_000);

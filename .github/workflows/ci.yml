@@ -28,6 +28,8 @@ jobs:
           filters: |
             image:
               - 'deploy/Dockerfile'
+              - 'shared/**'
+              - 'schema/**'
               - 'deploy/smoke-test.sh'
               - 'server/package*.json'
               - 'client/package*.json'

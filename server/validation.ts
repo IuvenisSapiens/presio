@@ -1,3 +1,6 @@
+import { PLUGIN_ID_RE } from "../shared/plugin/sources.js";
+import { MAX_MESSAGE_BYTES, MESSAGE_TYPE_RE, VIEWER_ADDRESS_RE } from "../shared/plugin/protocol.js";
+
 // Pure validation/sanitization helpers, factored out of the request/socket
 // handlers so they can be unit-tested without a server or Supabase.
 
@@ -58,11 +61,13 @@ export function isValidSlideNumber(slideNumber: unknown, total: unknown): boolea
 // published (where to load them — never the plugins themselves). These caps
 // bound what a controller or viewer can make it hold.
 
-export const PLUGIN_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const PLUGIN_TYPE_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+// Plugin ids are derived from where a plugin is loaded from ("presio/timer",
+// "alice/poll", "url:localhost:5174/demo"; see shared/plugin/sources.ts).
+export { PLUGIN_ID_RE };
+const PLUGIN_TYPE_RE = MESSAGE_TYPE_RE;
 // A plugin page's SHA-256, hex.
 const HASH_RE = /^[0-9a-f]{64}$/;
-const MAX_PLUGIN_PAYLOAD_BYTES = 16 * 1024;
+const MAX_PLUGIN_PAYLOAD_BYTES = MAX_MESSAGE_BYTES;
 export const MAX_PLUGINS_PER_SESSION = 8;
 // Retained messages are a plugin's state for late joiners, one message per
 // piece of it — a drawing keeps each slide's strokes in a few. So a plugin may
@@ -82,11 +87,13 @@ export interface PluginEvent {
   retain: Retain;
   /** May be dropped for a backed-up viewer rather than queued. */
   volatile: boolean;
+  /** Presenter: for this one viewer only (its socket id); never retained. */
+  to?: string;
 }
 
 interface PluginManifest {
-  id: string;
   name: string;
+  displayName?: string;
   version: string;
   author?: string;
   description?: string;
@@ -94,10 +101,11 @@ interface PluginManifest {
   permissions: string[];
 }
 
-/** A plugin the presenter runs on viewers: where they load it from, and the
- *  hash of its HTML, which viewers check what they load against. The server
- *  never carries the plugin itself. */
+/** A plugin the presenter runs on viewers: its id, where they load it from,
+ *  and the hash of its HTML, which viewers check what they load against. The
+ *  server never carries the plugin itself. */
 export interface PublishedPlugin {
+  id: string;
   manifest: PluginManifest;
   url: string;
   hash: string;
@@ -126,8 +134,10 @@ export function sanitizePluginEvent(raw: unknown): PluginEvent | null {
   if (typeof e.type !== "string" || !PLUGIN_TYPE_RE.test(e.type)) return null;
   const payload = e.payload === undefined ? null : e.payload;
   if (jsonSize(payload) > MAX_PLUGIN_PAYLOAD_BYTES) return null;
-  const retain = e.retain === true || e.retain === "deck" ? e.retain : false;
-  return { plugin: e.plugin, type: e.type, payload, retain, volatile: e.volatile === true };
+  if (e.to !== undefined && (typeof e.to !== "string" || !VIEWER_ADDRESS_RE.test(e.to))) return null;
+  const to = e.to as string | undefined;
+  const retain = !to && (e.retain === true || e.retain === "deck") ? e.retain : false;
+  return { plugin: e.plugin, type: e.type, payload, retain, volatile: e.volatile === true, ...(to ? { to } : {}) };
 }
 
 // A plugin's resolved settings, as the presenter publishes them for viewers.
@@ -142,6 +152,15 @@ export function sanitizePluginSettings(raw: unknown): { plugin: string; settings
 
 // A viewer couldn't load a plugin the presenter published: which (by id and
 // the hash it was published with) and why, in a line for the presenter.
+// The plugins a viewer has frames running for (plugin_presence): at most one
+// per published plugin.
+export function sanitizePluginPresence(raw: unknown): string[] | null {
+  const plugins = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>).plugins : null;
+  if (!Array.isArray(plugins) || plugins.length > MAX_PLUGINS_PER_SESSION) return null;
+  if (!plugins.every((p) => typeof p === "string" && PLUGIN_ID_RE.test(p))) return null;
+  return [...new Set(plugins as string[])];
+}
+
 export function sanitizePluginLoadFailure(raw: unknown): { plugin: string; hash: string; reason: string } | null {
   const e = pluginMessage(raw);
   if (!e) return null;
@@ -158,10 +177,10 @@ const shortString = (v: unknown, max: number): string | undefined =>
 // can publish, but it is still client input, so everything is re-checked here.
 export function sanitizePublishedPlugin(raw: unknown): PublishedPlugin | null {
   if (typeof raw !== "object" || raw === null) return null;
-  const b = raw as { manifest?: Record<string, unknown>; url?: unknown; hash?: unknown };
+  const b = raw as { id?: unknown; manifest?: Record<string, unknown>; url?: unknown; hash?: unknown };
   const m = b.manifest;
   if (typeof m !== "object" || m === null) return null;
-  if (typeof m.id !== "string" || !PLUGIN_ID_RE.test(m.id)) return null;
+  if (typeof b.id !== "string" || !PLUGIN_ID_RE.test(b.id)) return null;
   const name = shortString(m.name, 80);
   const version = shortString(m.version, 32);
   if (!name || !version) return null;
@@ -175,9 +194,10 @@ export function sanitizePublishedPlugin(raw: unknown): PublishedPlugin | null {
   if (!/^(\/(?!\/)|https?:\/\/)/i.test(url)) return null;
   if (typeof b.hash !== "string" || !HASH_RE.test(b.hash)) return null;
   return {
+    id: b.id,
     manifest: {
-      id: m.id,
       name,
+      displayName: shortString(m.displayName, 80),
       version,
       author: shortString(m.author, 80),
       description: shortString(m.description, 300),
