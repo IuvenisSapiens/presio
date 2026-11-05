@@ -1,14 +1,16 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams, useSearchParams, useNavigate, useLocation, Link } from "react-router-dom";
 import type { PDFDocumentProxy } from "pdfjs-dist";
-import { loadPdf, loadPdfData, freshPdfUrl, loadLatestPdf, renderPageInto, clearCache, destroyPdf, preloadPdf } from "@/lib/pdf";
+import { loadPdf, loadPdfData, freshPdfUrl, loadLatestPdf, renderPageInto, clearCache, destroyPdf, preloadPdf, isTransient } from "@/lib/pdf";
 import { makeDeck, loadDeckExtras, type DeckExtras } from "@/lib/deck";
 import { useRenderTargetSize } from "@/hooks/useRenderTargetSize";
 import { useElementRef } from "@/hooks/useElementRef";
 import { lsGetString, lsSetString, lsRemove, deckWatchKey, slideKey } from "@/lib/storage";
 import { socket } from "@/lib/socket";
 import { useLatestRef } from "@/hooks/useLatestRef";
-import { useSessionTransport } from "@/hooks/useSessionTransport";
+import { useSessionTransport, SESSION_ENDED } from "@/hooks/useSessionTransport";
+import { useSessionSuccessor } from "@/hooks/useSessionSuccessor";
+import { useCodeSuggestion } from "@/hooks/useCodeSuggestion";
 import { DeckLoadTimer } from "@/lib/deckLoadMetrics";
 import { endSession } from "@/lib/utils";
 import { idbGet, idbPut, idbDelete } from "@/lib/localStore";
@@ -30,6 +32,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { usePluginHost } from "@/lib/plugins/usePluginHost";
 import { ControllerView } from "./ControllerView";
 import { ViewerView } from "./ViewerView";
+
+const SESSION_NOT_FOUND = "Session not found";
+/** The deck download kept failing even after loadPdf's retries. */
+const DOWNLOAD_FAILED = "Couldn't download the presentation";
 
 export default function Presentation() {
   const { id } = useParams<{ id: string }>();
@@ -64,6 +70,13 @@ export default function Presentation() {
   const [totalSlides, setTotalSlides] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // Following a presenter to a new session (useSessionSuccessor) re-renders
+  // this same page under a new id: the old session's error must not stay up.
+  const [errorFor, setErrorFor] = useState(id);
+  if (errorFor !== id) {
+    setErrorFor(id);
+    setError("");
+  }
   const [blanked, setBlanked] = useState(false);
 
   // Everything extracted from the loaded PDF, re-derived whenever the
@@ -349,7 +362,7 @@ export default function Presentation() {
           throw new Error("This presentation is only available in the same browser on the device it was created on");
         }
         const res = await fetch(`/api/sessions/${id}`);
-        if (!res.ok) throw new Error("Session not found");
+        if (!res.ok) throw new Error(SESSION_NOT_FOUND);
         const session = await res.json();
         if (session.local) {
           // Server knows this code, but the PDF only lives on the presenter's device.
@@ -380,7 +393,11 @@ export default function Presentation() {
         setTotalSlides(session.total_slides);
         setCurrentSlide(session.current_slide);
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load presentation");
+        if (!cancelled) {
+          setError(
+            isTransient(e) ? DOWNLOAD_FAILED : e instanceof Error ? e.message : "Failed to load presentation"
+          );
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -777,6 +794,11 @@ export default function Presentation() {
     void watcherRef.current?.resume();
   }, []);
 
+  // A viewer whose session is gone waits for the presenter's next one.
+  const sessionEnded = useSessionSuccessor(id, !!error && local !== true && requestedRole === "viewer");
+  // A code that never existed was most likely mistyped.
+  const suggestedCode = useCodeSuggestion(id, error === SESSION_NOT_FOUND && !sessionEnded && requestedRole === "viewer");
+
   if (loading || (!error && !deck)) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -792,12 +814,28 @@ export default function Presentation() {
           <CardContent className="pt-6 space-y-4 text-center">
             <p className="text-3xl">😕</p>
             <div className="space-y-1">
-              <h2 className="text-lg font-semibold">{error}</h2>
+              <h2 className="text-lg font-semibold">{sessionEnded ? SESSION_ENDED : error}</h2>
               <p className="text-sm text-muted-foreground">
-                The presentation may have expired or been ended by the presenter.
+                {sessionEnded
+                  ? "Keep this page open: if the presenter starts a new session, you'll be taken there automatically."
+                  : error === DOWNLOAD_FAILED
+                    ? "The connection dropped while the slides were loading. Large decks on a busy network can take a few tries."
+                    : "The presentation may have expired or been ended by the presenter."}
               </p>
             </div>
-            <Button asChild className="w-full">
+            {error === DOWNLOAD_FAILED && (
+              <Button className="w-full" onClick={() => window.location.reload()}>
+                Try again
+              </Button>
+            )}
+            {suggestedCode && (
+              <Button asChild className="w-full">
+                <Link to={`/s/${suggestedCode}?role=viewer`} replace onClick={() => track("join-code-suggestion")}>
+                  Did you mean <span className="font-mono font-bold tracking-widest">{suggestedCode}</span>?
+                </Link>
+              </Button>
+            )}
+            <Button asChild className="w-full" variant={suggestedCode || error === DOWNLOAD_FAILED ? "outline" : "default"}>
               <Link to="/">Back to Home</Link>
             </Button>
           </CardContent>

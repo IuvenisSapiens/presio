@@ -9,17 +9,17 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
-    "@sentry/node": "^11.8.0",
-    "@supabase/supabase-js": "^2.118.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@sentry/node": "^11.11.0",
+    "@supabase/supabase-js": "^2.119.0",
     "better-sqlite3": "^13.0.3",
     "cors": "^2.8.6",
-    "dotenv": "^18.0.8",
+    "dotenv": "^18.0.9",
     "express": "^5.3.0",
     "helmet": "^8.3.0",
-    "multer": "^2.4.0",
+    "multer": "^2.5.0",
     "nanoid": "^6.0.2",
-    "pdfjs-dist": "^6.3.289",
+    "pdfjs-dist": "^6.5.438",
     "socket.io": "^4.8.4",
     "zod": "^4.6.7"
   },
@@ -33,6 +33,6 @@
     "supertest": "^7.3.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.0"
   }
 }
