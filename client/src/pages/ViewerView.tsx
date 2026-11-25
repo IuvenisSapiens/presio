@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
-import { RotateCw, EllipsisVertical, ArrowLeft, ArrowRight, ChevronFirst, ChevronLast, Hash, Maximize, Minimize, MonitorCog, House, Puzzle } from "lucide-react";
-import { getSessionAuth, setSessionAuth } from "@/lib/utils";
+import { RotateCw, EllipsisVertical, ArrowLeft, ArrowRight, ChevronFirst, ChevronLast, ChevronsLeft, ChevronsRight, Hash, Maximize, Minimize, MonitorCog, House, Puzzle } from "lucide-react";
+import { getSessionAuth } from "@/lib/utils";
 import { appOrigin, onViewerOrigin, TAKEOVER_PARAM } from "@/lib/origins";
 import { Button } from "@/components/ui/button";
 import { DialogOverlay } from "@/components/ui/dialog-overlay";
@@ -21,7 +21,12 @@ import { goToSlideItems } from "@/components/controller/controllerCommands";
 import { appPaletteItems, slideArg, useAppCommands, type AppCommand } from "@/lib/commands";
 import { runsOnViewer, useViewerPluginSwitches } from "@/lib/plugins/viewerSwitches";
 import { track } from "@/lib/analytics";
-import { isEditableTarget } from "@/lib/keymap";
+import { DEFAULT_KEYMAP, isEditableTarget, matchesBinding } from "@/lib/keymap";
+import { nextSectionStart, prevSectionStart } from "@/lib/sections";
+import { fromAudienceZoom, type AudienceZoom } from "@/lib/audienceZoom";
+import { useContainedCanvasRect } from "@/hooks/useContainedCanvasRect";
+import { useElementSize } from "@/hooks/useElementSize";
+import { signInWithPassphrase } from "@/lib/sessionAuth";
 
 export function ViewerView({
   id,
@@ -33,6 +38,8 @@ export function ViewerView({
   outOfSync,
   onViewerGoTo,
   onResync,
+  zoom,
+  controlDenied,
   plugins,
 }: {
   id: string;
@@ -44,9 +51,17 @@ export function ViewerView({
   outOfSync: boolean;
   onViewerGoTo: (slide: number) => void;
   onResync: () => void;
+  /** The presenter's zoom into the slide, shown here too. */
+  zoom: AudienceZoom;
+  /** This window was opened as the controller but let in as a viewer; with
+   *  why, when a controller link's passphrase was refused. */
+  controlDenied: { reason: string } | null;
   plugins: PluginHostState;
 }) {
-  const { totalSlides } = deck;
+  const { totalSlides, sections } = deck;
+  const slidePage = useContainedCanvasRect(canvasRef, currentSlide);
+  const slideBox = useElementSize(canvasRef);
+  const slideZoom = useMemo(() => fromAudienceZoom(zoom, slideBox, slidePage), [zoom, slideBox, slidePage]);
   const navigate = useNavigate();
   const [cursorVisible, setCursorVisible] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -56,6 +71,15 @@ export function ViewerView({
   const [authOpen, setAuthOpen] = useState(() => new URLSearchParams(window.location.search).has(TAKEOVER_PARAM));
   const [passphrase, setPassphrase] = useState("");
   const [authError, setAuthError] = useState("");
+  // Opened from a controller link that didn't make this device the controller:
+  // ask for the passphrase, saying why, rather than leave someone who meant
+  // to present looking at a viewer (issue #172).
+  const [deniedShown, setDeniedShown] = useState<typeof controlDenied>(null);
+  if (controlDenied && controlDenied !== deniedShown) {
+    setDeniedShown(controlDenied);
+    setAuthOpen(true);
+    if (controlDenied.reason) setAuthError(controlDenied.reason);
+  }
   const [authLoading, setAuthLoading] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(null);
@@ -116,6 +140,12 @@ export function ViewerView({
           { id: "prevSlide", title: "Previous slide", category: "Navigation", icon: ArrowLeft, shortcut: "←", exposed: true, run: () => onViewerGoTo(clamp(currentSlide - 1)) },
           { id: "firstSlide", title: "First slide", category: "Navigation", icon: ChevronFirst, exposed: true, run: () => onViewerGoTo(1) },
           { id: "lastSlide", title: "Last slide", category: "Navigation", icon: ChevronLast, exposed: true, run: () => onViewerGoTo(totalSlides) },
+          ...(sections.length
+            ? [
+                { id: "nextSection", title: "Next section", category: "Navigation", icon: ChevronsRight, shortcut: "⌥→", run: () => onViewerGoTo(nextSectionStart(sections, currentSlide) ?? currentSlide) },
+                { id: "prevSection", title: "Previous section", category: "Navigation", icon: ChevronsLeft, shortcut: "⌥←", run: () => onViewerGoTo(prevSectionStart(sections, currentSlide) ?? currentSlide) },
+              ]
+            : []),
           { id: "goToSlide", title: "Go to slide…", category: "Navigation", icon: Hash, prefill: "slide ", exposed: true, run: (args: Record<string, unknown>) => onViewerGoTo(clamp(slideArg(args))) },
           ...(outOfSync ? [{ id: "resync", title: "Follow the presenter again", category: "Navigation", icon: RotateCw, keywords: "sync", run: onResync }] : []),
         ]
@@ -149,17 +179,23 @@ export function ViewerView({
       if (isEditableTarget(e.target)) return;
       if (e.key === "f" || e.key === "F") {
         toggleFullscreen();
-      } else if (e.key === "ArrowRight" || e.key === " " || e.key === "PageDown") {
+      } else {
+        // The presenter's default keys (a viewer has no keymap of its own).
+        const to = matchesBinding(e, DEFAULT_KEYMAP.nextSlide) ? currentSlide + 1
+          : matchesBinding(e, DEFAULT_KEYMAP.prevSlide) ? currentSlide - 1
+          : matchesBinding(e, DEFAULT_KEYMAP.firstSlide) ? 1
+          : matchesBinding(e, DEFAULT_KEYMAP.lastSlide) ? totalSlides
+          : matchesBinding(e, DEFAULT_KEYMAP.nextSection) ? nextSectionStart(sections, currentSlide)
+          : matchesBinding(e, DEFAULT_KEYMAP.prevSection) ? prevSectionStart(sections, currentSlide)
+          : undefined;
+        if (to === undefined) return;
         e.preventDefault();
-        onViewerGoTo(currentSlide + 1);
-      } else if (e.key === "ArrowLeft" || e.key === "PageUp") {
-        e.preventDefault();
-        onViewerGoTo(currentSlide - 1);
+        if (to !== null) onViewerGoTo(to);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [currentSlide, onViewerGoTo, toggleFullscreen]);
+  }, [currentSlide, totalSlides, sections, onViewerGoTo, toggleFullscreen]);
 
   // Take control: on the viewer origin the controller token must never be
   // stored (lib/origins.ts), so ask for the passphrase on the app origin.
@@ -182,20 +218,7 @@ export function ViewerView({
     setAuthError("");
     setAuthLoading(true);
     try {
-      const res = await fetch(`/api/sessions/${id}/auth`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ passphrase }),
-      });
-      if (!res.ok) {
-        const body = await res.json();
-        throw new Error(body.error || "Authentication failed");
-      }
-      const data = await res.json();
-      setSessionAuth(id, {
-        controllerToken: data.controllerToken,
-        passphrase: data.passphrase,
-      });
+      await signInWithPassphrase(id, passphrase);
       navigate(`/s/${id}?role=controller`, { replace: true });
     } catch (e: unknown) {
       setAuthError(e instanceof Error ? e.message : "Authentication failed");
@@ -212,22 +235,36 @@ export function ViewerView({
       className="h-screen w-screen bg-black flex items-center justify-center relative pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
       style={{ cursor: cursorVisible ? "default" : "none" }}
     >
-      <div ref={canvasRef} data-testid="viewer-slide" data-slide={currentSlide} className="w-full h-full relative" />
-      {/* Plugins' live layers on the slide (media, drawings, …): on the page,
-          over its links (which they let through), under the blank cover. */}
-      <SlideLayers plugins={running} slide={currentSlide} mode="live" containerRef={canvasRef} />
+      {/* The presenter's zoom moves the page, its links and plugins' layers
+          together, as on the controller's current-slide card. */}
+      <div className="w-full h-full relative overflow-hidden">
+        <div
+          className="absolute inset-0"
+          style={slideZoom.scale > 1 ? {
+            transform: `translate(${slideZoom.x}px, ${slideZoom.y}px) scale(${slideZoom.scale})`,
+            transformOrigin: "0 0",
+            transition: "transform 80ms linear",
+            willChange: "transform",
+          } : undefined}
+        >
+          <div ref={canvasRef} data-testid="viewer-slide" data-slide={currentSlide} className="absolute inset-0" />
+          {/* Plugins' live layers on the slide (media, drawings, …): on the page,
+              over its links (which they let through), under the blank cover. */}
+          <SlideLayers plugins={running} slide={currentSlide} mode="live" containerRef={canvasRef} zoom={slideZoom} />
 
-      {/* Internal links move this viewer only, and only when it is allowed to
-          navigate independently — a local viewer mirrors the controller, so it
-          gets no handler and those links stay inert. External links always
-          open. Hidden while blanked so nothing is clickable behind the cover. */}
-      {!blanked && (
-        <LinkOverlay
-          canvasContainerRef={canvasRef}
-          links={deck.linksBySlide.get(currentSlide) ?? []}
-          onGoToSlide={local ? undefined : onViewerGoTo}
-        />
-      )}
+          {/* Internal links move this viewer only, and only when it is allowed to
+              navigate independently — a local viewer mirrors the controller, so it
+              gets no handler and those links stay inert. External links always
+              open. Hidden while blanked so nothing is clickable behind the cover. */}
+          {!blanked && (
+            <LinkOverlay
+              canvasContainerRef={canvasRef}
+              links={deck.linksBySlide.get(currentSlide) ?? []}
+              onGoToSlide={local ? undefined : onViewerGoTo}
+            />
+          )}
+        </div>
+      </div>
 
       <ViewerHint canNavigate={!local} />
 
@@ -333,7 +370,9 @@ export function ViewerView({
           <div className="space-y-3">
             <h2 className="text-lg font-semibold text-center">Enter Passphrase</h2>
             <p className="text-xs text-muted-foreground text-center">
-              Enter the controller passphrase to take control of this presentation.
+              {deniedShown
+                ? "This is a controller link, but this device isn't signed in as the controller yet. Enter the passphrase from the presenter's Settings → Shared control, or ask them for a new controller link from Share."
+                : "Enter the controller passphrase to take control of this presentation."}
             </p>
             <input
               type="text"

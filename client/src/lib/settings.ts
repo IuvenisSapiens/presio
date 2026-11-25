@@ -38,6 +38,8 @@ export interface CoreSettings {
   "share.lanAddress": string;
   "home.minimal": boolean;
   "layout.forceDesktop": boolean;
+  "present.keepAwake": boolean;
+  "present.shareZoom": boolean;
   /** By source without its version (shared/plugin/sources.ts): whether it's
    *  on, where it loads from, the id it has and the version it's on (a tag,
    *  a branch or a commit). Built-ins appear only once toggled. */
@@ -58,12 +60,12 @@ const isPluginCommandKey = (key: string) => {
 function sanitizeKeymap(raw: unknown): Keymap | undefined {
   if (!isRecord(raw)) return undefined;
   const isBinding = (b: unknown): b is KeyBinding =>
-    isRecord(b) && typeof b.key === "string" && b.key.length > 0 && (b.meta === undefined || typeof b.meta === "boolean") && (b.shift === undefined || typeof b.shift === "boolean");
+    isRecord(b) && typeof b.key === "string" && b.key.length > 0 && (b.meta === undefined || typeof b.meta === "boolean") && (b.alt === undefined || typeof b.alt === "boolean") && (b.shift === undefined || typeof b.shift === "boolean");
   // Merged over the defaults, so a map saved before an action existed still
   // binds it.
   const km: Keymap = { ...DEFAULT_KEYMAP };
   const clean = (list: KeyBinding[]) =>
-    list.map((b): KeyBinding => ({ key: b.key, ...(b.meta && { meta: true }), ...(b.shift && { shift: true }) }));
+    list.map((b): KeyBinding => ({ key: b.key, ...(b.meta && { meta: true }), ...(b.alt && { alt: true }), ...(b.shift && { shift: true }) }));
   for (const action of KEYMAP_ACTIONS) {
     const list = raw[action];
     if (Array.isArray(list) && list.every(isBinding)) km[action] = clean(list);
@@ -117,6 +119,16 @@ export const CORE_SETTINGS: { [K in CoreSettingKey]: CoreSpec<CoreSettings[K]> }
     type: "boolean",
     default: false,
     description: "Use the desktop layout on phones and tablets too (also set by ?desktop=1).",
+  },
+  "present.keepAwake": {
+    type: "boolean",
+    default: true,
+    description: "Keep the screen from dimming or sleeping while a presentation is open.",
+  },
+  "present.shareZoom": {
+    type: "boolean",
+    default: true,
+    description: "Zooming into the current slide on the controller zooms the audience's slide too.",
   },
   plugins: {
     type: "object",
