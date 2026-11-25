@@ -6,6 +6,12 @@
 //  - "audio" (retained): whether media is heard, and where.
 //  - "time": a playing item's position, a few times a second, stamped with
 //    the server clock, for viewers to keep in time with.
+//  - "modes" (retained): HTML animations the presenter has switched between
+//    following the presenter and viewers running it themselves, by item id.
+//  - "page" (retained): the state of the HTML animations on the current
+//    slide (what the presenter changed on them), for viewers following.
+//  - "jump": the presenter's "Sync", for viewers running an animation
+//    themselves: its time and state.
 
 import type { Action } from "./players";
 
@@ -31,6 +37,27 @@ export interface TimeMessage {
   t: number;
   playing: boolean;
   sampledAt: number;
+}
+
+/** Item id → true when viewers run it themselves. Missing: the author's default. */
+export type Modes = Record<string, boolean>;
+
+export function parseModes(v: unknown): Modes | null {
+  if (!isRecord(v)) return null;
+  const out: Modes = {};
+  for (const [id, independent] of Object.entries(v)) if (typeof independent === "boolean") out[id] = independent;
+  return out;
+}
+
+/** The HTML animations' page states on one slide, by item id. */
+export interface PageStates {
+  slide: number;
+  states: Record<string, unknown>;
+}
+
+export function parsePageStates(v: unknown): PageStates | null {
+  if (!isRecord(v) || typeof v.slide !== "number" || !isRecord(v.states)) return null;
+  return { slide: v.slide, states: v.states };
 }
 
 export const DEFAULT_AUDIO: AudioState = { muted: true, target: "both" };
